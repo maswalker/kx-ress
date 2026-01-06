@@ -1,0 +1,35 @@
+[package]
+name = "ress-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# alloy
+alloy-primitives.workspace = true
+alloy-eips.workspace = true
+
+# reth
+reth-ress-protocol.workspace = true
+reth-primitives.workspace = true
+reth-chainspec.workspace = true
+reth-storage-errors.workspace = true
+reth-db = { workspace = true, features = ["mdbx"] }
+reth-db-api.workspace = true
+
+# misc
+parking_lot.workspace = true
+eyre.workspace = true
+itertools.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+derive_more.workspace = true
+tempfile = "3.8"
