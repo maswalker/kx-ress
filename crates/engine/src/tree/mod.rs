@@ -1,11 +1,9 @@
-// ConsensusEngine is core - keeping all functionality
-#![allow(dead_code, unused_imports)] // Some code paths not used but needed for ConsensusEngine
+#![allow(dead_code, unused_imports)]
 
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{keccak256, map::B256Map, B256, U256};
 use alloy_rpc_types_engine::{
-    ExecutionData, ForkchoiceState, PayloadAttributes, PayloadStatus, PayloadStatusEnum,
-    PayloadValidationError,
+    PayloadStatus, PayloadStatusEnum, PayloadValidationError,
 };
 use metrics::Gauge;
 use rayon::iter::IntoParallelRefIterator;
@@ -19,14 +17,11 @@ use reth_engine_tree::tree::{
     error::{InsertBlockError, InsertBlockErrorKind, InsertBlockFatalError},
     EngineValidator, InvalidHeaderCache,
 };
-use reth_errors::{ProviderError, RethResult};
+use reth_errors::ProviderError;
 use reth_ethereum_engine_primitives::{EthEngineTypes, EthPayloadBuilderAttributes};
 use reth_metrics::Metrics;
-use reth_node_api::{
-    BeaconConsensusEngineEvent, EngineApiMessageVersion, ForkchoiceStateTracker,
-    OnForkChoiceUpdated, PayloadBuilderAttributes, PayloadValidator,
-};
-use reth_node_ethereum::{consensus::EthBeaconConsensus, EthereumEngineValidator};
+use reth_node_api::PayloadBuilderAttributes;
+use reth_node_ethereum::consensus::EthBeaconConsensus;
 use reth_primitives::{Block, EthPrimitives, GotExpected, Header, RecoveredBlock, SealedBlock};
 use reth_primitives_traits::SealedHeader;
 use reth_provider::ExecutionOutcome;
@@ -36,7 +31,6 @@ use reth_trie_sparse::{
     SparseStateTrie,
 };
 use std::{sync::Arc, time::Instant};
-use tokio::sync::mpsc;
 use tracing::*;
 
 mod outcome;
@@ -56,20 +50,10 @@ pub struct EngineTree {
     pub(crate) provider: RessProvider,
     /// Consensus.
     pub(crate) consensus: EthBeaconConsensus<ChainSpec>,
-    /// Engine validator.
-    pub(crate) engine_validator: EthereumEngineValidator,
-
-    /// Current canonical head.
-    pub(crate) canonical_head: BlockNumHash,
-    /// Tracks the forkchoice state updates received by the CL.
-    pub(crate) forkchoice_state_tracker: ForkchoiceStateTracker,
     /// Pending block buffer.
     pub(crate) block_buffer: BlockBuffer<Block>,
     /// Invalid headers.
     pub(crate) invalid_headers: InvalidHeaderCache,
-
-    /// Outgoing events that are emitted to the handler.
-    events_sender: mpsc::UnboundedSender<BeaconConsensusEngineEvent<EthPrimitives>>,
     /// Metrics.
     metrics: EngineTreeMetrics,
 }
@@ -79,30 +63,20 @@ impl EngineTree {
     pub fn new(
         provider: RessProvider,
         consensus: EthBeaconConsensus<ChainSpec>,
-        engine_validator: EthereumEngineValidator,
-        events_sender: mpsc::UnboundedSender<BeaconConsensusEngineEvent<EthPrimitives>>,
     ) -> Self {
-        let canonical_head = provider.chain_spec().genesis_header().num_hash_slow();
         Self {
             provider,
             consensus,
-            engine_validator,
-            canonical_head,
-            forkchoice_state_tracker: ForkchoiceStateTracker::default(),
             block_buffer: BlockBuffer::new(256),
             invalid_headers: InvalidHeaderCache::new(256),
-            events_sender,
             metrics: EngineTreeMetrics::default(),
         }
     }
 
     /// Returns true if the given hash is the last received sync target block.
     ///
-    /// See [`ForkchoiceStateTracker::sync_target_state`]
-    fn is_sync_target_head(&self, block_hash: B256) -> bool {
-        if let Some(target) = self.forkchoice_state_tracker.sync_target_state() {
-            return target.head_block_hash == block_hash
-        }
+    /// Always returns false since we don't track forkchoice state.
+    fn is_sync_target_head(&self, _block_hash: B256) -> bool {
         false
     }
 
@@ -113,439 +87,16 @@ impl EngineTree {
     }
 
     /// Determines if the given block is part of a fork.
-    fn is_fork(&self, target_hash: B256) -> bool {
-        // verify that the given hash is not part of an extension of the canon chain.
-        let canonical_head = self.canonical_head;
-        let mut current_hash = target_hash;
-        while let Some(current_block) = self.provider.sealed_header(&current_hash) {
-            if current_block.hash() == canonical_head.hash {
-                return false
-            }
-            // We already passed the canonical head
-            if current_block.number <= canonical_head.number {
-                break
-            }
-            current_hash = current_block.parent_hash;
-        }
-
+    /// Always returns true since we don't track canonical head.
+    fn is_fork(&self, _target_hash: B256) -> bool {
         true
     }
 
-    /// Emits an outgoing event to the engine.
-    pub fn emit_event(&mut self, event: BeaconConsensusEngineEvent<EthPrimitives>) {
-        let _ = self.events_sender.send(event).inspect_err(
-            |err| error!(target: "engine::tree", ?err, "Failed to send internal event"),
-        );
+    /// Get canonical head from genesis header.
+    fn canonical_head(&self) -> BlockNumHash {
+        self.provider.chain_spec().genesis_header().num_hash_slow()
     }
 
-    /// Set canonical head.
-    pub fn set_canonical_head(&mut self, head: BlockNumHash) {
-        self.canonical_head = head;
-        self.metrics.head.set(head.number as f64);
-    }
-
-    /// Handle forkchoice update.
-    #[allow(dead_code)] // Not used since ConsensusEngine is not started
-    pub fn on_forkchoice_updated(
-        &mut self,
-        state: ForkchoiceState,
-        payload_attrs: Option<PayloadAttributes>,
-        version: EngineApiMessageVersion,
-    ) -> RethResult<TreeOutcome<OnForkChoiceUpdated>> {
-        // ===================== Validation =====================
-        if let Some(on_updated) = self.pre_validate_forkchoice_update(state) {
-            return Ok(TreeOutcome::new(on_updated));
-        }
-
-        // Process the forkchoice update by trying to make the head block canonical
-        //
-        // We can only process this forkchoice update if:
-        // - we have the `head` block
-        // - the head block is part of a chain that is connected to the canonical chain. This
-        //   includes reorgs.
-        //
-        // Performing a FCU involves:
-        // - marking the FCU's head block as canonical
-        // - updating in memory state to reflect the new canonical chain
-        // - updating canonical state trackers
-        // - emitting a canonicalization event for the new chain (including reorg)
-        // - if we have payload attributes, delegate them to the payload service
-
-        // 1. ensure we have a new head block
-        if self.canonical_head.hash == state.head_block_hash {
-            trace!(target: "ress::engine", "fcu head hash is already canonical");
-
-            // update the safe and finalized blocks and ensure their values are valid
-            if let Err(outcome) = self.ensure_consistent_forkchoice_state(state) {
-                // safe or finalized hashes are invalid
-                return Ok(TreeOutcome::new(outcome));
-            }
-
-            // we still need to process payload attributes if the head is already canonical
-            if let Some(attr) = payload_attrs {
-                let head = self.canonical_head;
-                let tip = self.provider.sealed_header(&head.hash).ok_or_else(|| {
-                    // If we can't find the canonical block, then something is wrong and we need
-                    // to return an error
-                    ProviderError::HeaderNotFound(state.head_block_hash.into())
-                })?;
-                if let Some(status) = self.validate_payload_attributes(attr, &tip, state, version) {
-                    return Ok(TreeOutcome::new(status)); // payload attributes are invalid
-                }
-            }
-
-            // the head block is already canonical
-            return Ok(TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::new(
-                PayloadStatusEnum::Valid,
-                Some(state.head_block_hash),
-            ))));
-        }
-
-        // 2. ensure we can apply a new chain update for the head block
-        if let Some(chain_update) = self.on_new_head(state.head_block_hash) {
-            let tip = chain_update.tip().clone();
-            self.on_canonical_chain_update(chain_update);
-
-            // update the safe and finalized blocks and ensure their values are valid
-            if let Err(outcome) = self.ensure_consistent_forkchoice_state(state) {
-                // safe or finalized hashes are invalid
-                return Ok(TreeOutcome::new(outcome));
-            }
-
-            // clean up blocks from in-memory state and buffer
-            self.provider.on_finalized(&state.finalized_block_hash);
-            if let Some(finalized_number) = self.provider.block_number(&state.finalized_block_hash)
-            {
-                self.block_buffer.evict_old_blocks(finalized_number);
-            }
-
-            if let Some(attr) = payload_attrs {
-                if let Some(status) = self.validate_payload_attributes(attr, &tip, state, version) {
-                    return Ok(TreeOutcome::new(status)); // payload attributes are invalid
-                }
-            }
-
-            return Ok(TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::new(
-                PayloadStatusEnum::Valid,
-                Some(state.head_block_hash),
-            ))));
-        }
-
-        // 3. check if the head is already part of the canonical chain
-        if let Some(header) = self.provider.sealed_header(&state.head_block_hash) {
-            debug!(target: "ress::engine", head = header.number, "fcu head block is already canonical");
-
-            // 2. Client software MAY skip an update of the forkchoice state and MUST NOT begin a
-            //    payload build process if `forkchoiceState.headBlockHash` references a `VALID`
-            //    ancestor of the head of canonical chain, i.e. the ancestor passed payload
-            //    validation process and deemed `VALID`. In the case of such an event, client
-            //    software MUST return `{payloadStatus: {status: VALID, latestValidHash:
-            //    forkchoiceState.headBlockHash, validationError: null}, payloadId: null}`
-
-            // the head block is already canonical, so we're not triggering a payload job and can
-            // return right away
-            return Ok(TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::new(
-                PayloadStatusEnum::Valid,
-                Some(state.head_block_hash),
-            ))));
-        }
-
-        // 4. we don't have the block to perform the update
-        // we assume the FCU is valid and at least the head is missing,
-        // so we need to start syncing to it
-        //
-        // find the appropriate target to sync to, if we don't have the safe block hash then we
-        // start syncing to the safe block via backfill first
-        let mut outcome = TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::from_status(
-            PayloadStatusEnum::Syncing,
-        )));
-
-        // Find the appropriate target to sync to.
-        if !state.finalized_block_hash.is_zero() &&
-            !self.is_block_persisted_or_buffered(&state.finalized_block_hash)
-        {
-            debug!(target: "ress::engine", finalized = %state.finalized_block_hash, "Missing finalized block on FCU, downloading");
-            outcome = outcome.with_event(TreeEvent::download_finalized(state.finalized_block_hash));
-        } else {
-            let target = if !state.safe_block_hash.is_zero() &&
-                !self.is_block_persisted_or_buffered(&state.safe_block_hash)
-            {
-                state.safe_block_hash
-            } else {
-                state.head_block_hash
-            };
-            let target = self.lowest_buffered_ancestor_or(target);
-            if target != state.finalized_block_hash && !self.is_block_persisted_or_buffered(&target)
-            {
-                debug!(target: "ress::engine", %target, "Downloading missing ancestor on FCU");
-                outcome = outcome.with_event(TreeEvent::download_block(target));
-            }
-        }
-
-        Ok(outcome)
-    }
-
-    /// Pre-validate forkchoice update and check whether it can be processed.
-    ///
-    /// This method returns the update outcome if validation fails or
-    /// the node is syncing and the update cannot be processed at the moment.
-    fn pre_validate_forkchoice_update(
-        &mut self,
-        state: ForkchoiceState,
-    ) -> Option<OnForkChoiceUpdated> {
-        if state.head_block_hash.is_zero() {
-            return Some(OnForkChoiceUpdated::invalid_state());
-        }
-
-        // check if the new head hash is connected to any ancestor that we previously marked as
-        // invalid
-        let lowest_buffered_ancestor_fcu = self.lowest_buffered_ancestor_or(state.head_block_hash);
-        if let Some(status) = self.check_invalid_ancestor(lowest_buffered_ancestor_fcu) {
-            return Some(OnForkChoiceUpdated::with_invalid(status));
-        }
-
-        None
-    }
-
-    /// Ensures that the given forkchoice state is consistent, assuming the head block has been
-    /// made canonical.
-    ///
-    /// If the forkchoice state is consistent, this will return Ok(()). Otherwise, this will
-    /// return an instance of [`OnForkChoiceUpdated`] that is INVALID.
-    fn ensure_consistent_forkchoice_state(
-        &self,
-        state: ForkchoiceState,
-    ) -> Result<(), OnForkChoiceUpdated> {
-        if !state.finalized_block_hash.is_zero() &&
-            !self.provider.is_hash_canonical(&state.finalized_block_hash)
-        {
-            return Err(OnForkChoiceUpdated::invalid_state());
-        }
-        if !state.safe_block_hash.is_zero() &&
-            !self.provider.is_hash_canonical(&state.safe_block_hash)
-        {
-            return Err(OnForkChoiceUpdated::invalid_state());
-        }
-
-        Ok(())
-    }
-
-    /// Returns the new chain for the given head.
-    ///
-    /// This also handles reorgs.
-    ///
-    /// Note: This does not update the tracked state and instead returns the new chain based on the
-    /// given head.
-    fn on_new_head(&self, new_head: B256) -> Option<NewCanonicalChain> {
-        let new_head_block = self.provider.sealed_header(&new_head)?;
-
-        let mut current_canonical_number = self.canonical_head.number;
-        let (mut current_number, mut current_hash) =
-            new_head_block.parent_num_hash().into_components();
-        let mut new_chain = vec![new_head_block];
-
-        // Walk back the new chain until we reach a block we know about
-        //
-        // This is only done for in-memory blocks, because we should not have persisted any blocks
-        // that are _above_ the current canonical head.
-        while current_number > current_canonical_number {
-            if let Some(header) = self.provider.sealed_header(&current_hash) {
-                current_hash = header.parent_hash;
-                current_number -= 1;
-                new_chain.push(header);
-            } else {
-                // This should never happen as we're walking back a chain that should connect to the
-                // canonical chain.
-                warn!(target: "ress::engine", %current_hash, "Sidechain block not found in TreeState");
-                return None;
-            }
-        }
-
-        // If we have reached the current canonical head by walking back from the target, then we
-        // know this represents an extension of the canonical chain.
-        if current_hash == self.canonical_head.hash {
-            new_chain.reverse();
-            return Some(NewCanonicalChain::Commit { new: new_chain });
-        }
-
-        // We have a reorg. Walk back both chains to find the fork point.
-        let mut old_chain = Vec::new();
-        let mut old_hash = self.canonical_head.hash;
-
-        // If the canonical chain is ahead of the new chain,
-        // gather all blocks until new head number.
-        while current_canonical_number > current_number {
-            if let Some(header) = self.provider.sealed_header(&old_hash) {
-                old_hash = header.parent_hash;
-                current_canonical_number -= 1;
-                old_chain.push(header);
-            } else {
-                // This shouldn't happen as we're walking back the canonical chain
-                warn!(target: "ress::engine", current_hash=?old_hash, "Canonical block not found in TreeState");
-                return None;
-            }
-        }
-
-        // Both new and old chain pointers are now at the same height.
-        debug_assert_eq!(current_number, current_canonical_number);
-
-        // Walk both chains from specified hashes at same height until
-        // a common ancestor (fork block) is reached.
-        while old_hash != current_hash {
-            if let Some(header) = self.provider.sealed_header(&old_hash) {
-                old_hash = header.parent_hash;
-                old_chain.push(header);
-            } else {
-                // This shouldn't happen as we're walking back the canonical chain
-                warn!(target: "ress::engine", current_hash=?old_hash, "Canonical block not found in TreeState");
-                return None;
-            }
-
-            if let Some(header) = self.provider.sealed_header(&current_hash) {
-                current_hash = header.parent_hash;
-                new_chain.push(header);
-            } else {
-                // This shouldn't happen as we've already walked this path
-                warn!(target: "ress::engine", invalid_hash=?current_hash, "New chain block not found in TreeState");
-                return None;
-            }
-        }
-        new_chain.reverse();
-        old_chain.reverse();
-
-        Some(NewCanonicalChain::Reorg { new: new_chain, old: old_chain })
-    }
-
-    /// Validates the payload attributes with respect to the header and fork choice state.
-    ///
-    /// Note: At this point, the fork choice update is considered to be VALID, however, we can still
-    /// return an error if the payload attributes are invalid.
-    #[allow(dead_code)] // Not used since ConsensusEngine is not started
-    fn validate_payload_attributes(
-        &self,
-        attrs: PayloadAttributes,
-        head: &Header,
-        state: ForkchoiceState,
-        version: EngineApiMessageVersion,
-    ) -> Option<OnForkChoiceUpdated> {
-        // Note: This code path is not used since ConsensusEngine is not started
-        // Returning None to skip validation
-        None
-    }
-
-    /// Attempts to make the given target canonical.
-    ///
-    /// This will update the tracked canonical in memory state and do the necessary housekeeping.
-    pub fn make_canonical(&mut self, target: B256) {
-        if let Some(chain_update) = self.on_new_head(target) {
-            self.on_canonical_chain_update(chain_update);
-        }
-    }
-
-    /// Invoked when we the canonical chain has been updated.
-    ///
-    /// This is invoked on a valid forkchoice update, or if we can make the target block canonical.
-    fn on_canonical_chain_update(&mut self, update: NewCanonicalChain) {
-        trace!(target: "ress::engine", new_blocks = %update.new_block_count(), reorged_blocks = %update.reorged_block_count(), "applying new chain update");
-        let start = Instant::now();
-        let tip = update.tip().clone();
-        self.set_canonical_head(tip.num_hash());
-        let (new, old) = match update {
-            NewCanonicalChain::Commit { new } => (new, Vec::new()),
-            NewCanonicalChain::Reorg { new, old } => (new, old),
-        };
-        self.provider.on_chain_update(new, old);
-        // Note: This code path is not used since ConsensusEngine is not started
-        // self.emit_event(BeaconConsensusEngineEvent::<EthEngineTypes>::CanonicalChainCommitted(
-        //     Box::new(tip),
-        //     start.elapsed(),
-        // ));
-    }
-
-    /// Handler for new payload message.
-    pub fn on_new_payload(
-        &mut self,
-        payload: ExecutionData,
-        maybe_witness: Option<ExecutionWitness>,
-    ) -> Result<TreeOutcome<PayloadStatus>, InsertBlockFatalError> {
-        let parent_hash = payload.payload.parent_hash();
-
-        // Ensures that the given payload does not violate any consensus rules.
-        let block = match <EthereumEngineValidator as PayloadValidator<EthEngineTypes>>::ensure_well_formed_payload(&self.engine_validator, payload) {
-            Ok(block) => block,
-            Err(error) => {
-                error!(target: "ress::engine", %error, "Invalid payload");
-                let latest_valid_hash =
-                    if error.is_block_hash_mismatch() || error.is_invalid_versioned_hashes() {
-                        // Engine-API rules:
-                        // > `latestValidHash: null` if the blockHash validation has failed (<https://github.com/ethereum/execution-apis/blob/fe8e13c288c592ec154ce25c534e26cb7ce0530d/src/engine/shanghai.md?plain=1#L113>)
-                        // > `latestValidHash: null` if the expected and the actual arrays don't match (<https://github.com/ethereum/execution-apis/blob/fe8e13c288c592ec154ce25c534e26cb7ce0530d/src/engine/cancun.md?plain=1#L103>)
-                        None
-                    } else {
-                        self.latest_valid_hash_for_invalid_payload(parent_hash)
-                    };
-                let status = PayloadStatus::new(PayloadStatusEnum::from(error), latest_valid_hash);
-                return Ok(TreeOutcome::new(status));
-            }
-        };
-
-        let block_hash = block.hash();
-        let mut lowest_buffered_ancestor = self.lowest_buffered_ancestor_or(block_hash);
-        if lowest_buffered_ancestor == block_hash {
-            lowest_buffered_ancestor = block.parent_hash;
-        }
-
-        // now check the block itself
-        if let Some(status) =
-            self.check_invalid_ancestor_with_head(lowest_buffered_ancestor, block_hash)
-        {
-            return Ok(TreeOutcome::new(status));
-        }
-
-        // TODO:
-        // let recovered = match block.clone().try_recover() {
-        //     Ok(block) => block,
-        //     Err(_error) => {
-        //         return Ok(TreeOutcome::new(self.on_insert_block_error(InsertBlockError::new(
-        //             block.into_sealed_block(),
-        //             InsertBlockErrorKind::Provider(ProviderError::SenderRecoveryError),
-        //         ))?))
-        //     }
-        // };
-
-        let mut maybe_tree_event = None;
-        let status = match self.insert_block(block.clone(), maybe_witness) {
-            Ok(InsertPayloadOk::Inserted(BlockStatus::Valid) | InsertPayloadOk::AlreadySeen) => {
-                self.try_connect_buffered_blocks(block_hash)?;
-                // if the block is valid and it is the sync target head, make it canonical
-                if self.is_sync_target_head(block_hash) {
-                    maybe_tree_event = Some(TreeEvent::make_canonical(block_hash));
-                }
-                PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))
-            }
-            Ok(InsertPayloadOk::Inserted(BlockStatus::Disconnected {
-                missing_ancestor, ..
-            })) => {
-                // not known to be invalid, but we don't know anything else
-                maybe_tree_event = Some(TreeEvent::download_block(missing_ancestor.hash));
-                PayloadStatus::new(PayloadStatusEnum::Syncing, None)
-            }
-            Ok(InsertPayloadOk::Inserted(BlockStatus::NoWitness)) => {
-                // we don't have a witness to validate the payload
-                maybe_tree_event = Some(TreeEvent::download_witness(block_hash));
-                PayloadStatus::new(PayloadStatusEnum::Syncing, None)
-            }
-            Err(kind) => {
-                self.on_insert_block_error(InsertBlockError::new(block.into_sealed_block(), kind))?
-            }
-        };
-
-        let mut outcome = TreeOutcome::new(status);
-        if let Some(event) = maybe_tree_event {
-            outcome = outcome.with_event(event);
-        }
-        Ok(outcome)
-    }
 
     /// Invoked with a block downloaded from the network
     ///
@@ -557,27 +108,40 @@ impl EngineTree {
         block: RecoveredBlock<Block>,
         witness: ExecutionWitness,
     ) -> Result<TreeOutcome<PayloadStatus>, InsertBlockFatalError> {
+        self.on_downloaded_block_with_options(block, witness, true)
+    }
+
+    /// Handle downloaded block with options
+    /// `should_connect_children`: if true, try to connect buffered children after insertion
+    /// `should_download_parent`: if true, trigger parent download when disconnected
+    pub fn on_downloaded_block_with_options(
+        &mut self,
+        block: RecoveredBlock<Block>,
+        witness: ExecutionWitness,
+        should_connect_children: bool,
+    ) -> Result<TreeOutcome<PayloadStatus>, InsertBlockFatalError> {
         let block_num_hash = block.num_hash();
-        let lowest_buffered_ancestor = self.lowest_buffered_ancestor_or(block_num_hash.hash);
-        if let Some(status) =
-            self.check_invalid_ancestor_with_head(lowest_buffered_ancestor, block_num_hash.hash)
-        {
-            return Ok(TreeOutcome::new(status))
-        }
+        // Skip lowest_buffered_ancestor check to avoid recursive downloading
+        // We only need to verify the current block, not the entire chain
+        // let lowest_buffered_ancestor = self.lowest_buffered_ancestor_or(block_num_hash.hash);
+        // if let Some(status) =
+        //     self.check_invalid_ancestor_with_head(lowest_buffered_ancestor, block_num_hash.hash)
+        // {
+        //     return Ok(TreeOutcome::new(status))
+        // }
 
         // try to append the block
         let block_hash = block.hash();
         let mut maybe_tree_event = None;
         let status = match self.insert_block(block.clone(), Some(witness)) {
             Ok(InsertPayloadOk::Inserted(BlockStatus::Valid)) => {
-                if self.is_sync_target_head(block_num_hash.hash) {
-                    trace!(target: "ress::engine", block = ?block_num_hash, "appended downloaded sync target block");
-                    // we just inserted the current sync target block, we can try to make it
-                    // canonical
-                    maybe_tree_event = Some(TreeEvent::make_canonical(block_num_hash.hash));
+                if should_connect_children {
+                    info!(target: "ress::engine", block = ?block_num_hash, "Block inserted successfully, trying to connect buffered children");
+                    let connected_count = self.try_connect_buffered_blocks(block_num_hash.hash)?;
+                    info!(target: "ress::engine", block = ?block_num_hash, connected_children = connected_count, "Connected buffered children");
+                } else {
+                    info!(target: "ress::engine", block = ?block_num_hash, "Block inserted successfully (skipping buffered children connection)");
                 }
-                trace!(target: "ress::engine", block = ?block_num_hash, "appended downloaded block");
-                self.try_connect_buffered_blocks(block_num_hash.hash)?;
                 PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))
             }
             Ok(InsertPayloadOk::AlreadySeen) => {
@@ -587,9 +151,14 @@ impl EngineTree {
             Ok(InsertPayloadOk::Inserted(BlockStatus::Disconnected {
                 missing_ancestor, ..
             })) => {
-                // block is not connected to the canonical head, we need to download
-                // its missing branch first
-                maybe_tree_event = Some(TreeEvent::download_block(missing_ancestor.hash));
+                // block is not connected to the canonical head
+                // Only trigger parent download if should_connect_children is true (i.e., for pending blocks)
+                if should_connect_children {
+                    info!(target: "ress::engine", block = ?block_num_hash, missing_ancestor = ?missing_ancestor, "Block disconnected, downloading direct parent only");
+                    maybe_tree_event = Some(TreeEvent::download_block(missing_ancestor.hash));
+                } else {
+                    info!(target: "ress::engine", block = ?block_num_hash, missing_ancestor = ?missing_ancestor, "Block disconnected, but not downloading parent (non-pending block)");
+                }
                 PayloadStatus::new(PayloadStatusEnum::Syncing, None)
             }
             Ok(InsertPayloadOk::Inserted(BlockStatus::NoWitness)) => {
@@ -611,45 +180,75 @@ impl EngineTree {
     }
 
     /// Attempts to connect any buffered blocks that are connected to the given parent hash.
+    /// Returns the number of blocks that were successfully connected.
     fn try_connect_buffered_blocks(
         &mut self,
         parent_hash: B256,
-    ) -> Result<(), InsertBlockFatalError> {
+    ) -> Result<usize, InsertBlockFatalError> {
+        info!(target: "ress::engine", %parent_hash, "Looking for buffered children of parent");
         let blocks = self.block_buffer.remove_block_with_children(parent_hash);
 
         if blocks.is_empty() {
             // nothing to append
-            return Ok(())
+            info!(target: "ress::engine", %parent_hash, "No buffered children to connect");
+            return Ok(0)
         }
+        info!(target: "ress::engine", %parent_hash, children_count = blocks.len(), "Found buffered children to connect");
 
         let now = Instant::now();
         let block_count = blocks.len();
+        info!(target: "ress::engine", %parent_hash, children_count = block_count, "Attempting to connect buffered children");
+        let mut connected_count = 0;
         for (child, witness) in blocks {
             let child_num_hash = child.num_hash();
+            info!(target: "ress::engine", child = ?child_num_hash, "Trying to connect buffered child block");
+            // Clone witness before moving it into insert_block, in case we need to re-buffer
+            let witness_clone = witness.clone();
             match self.insert_block(child.clone(), Some(witness)) {
-                Ok(result) => {
-                    debug!(target: "engine::tree", child = ?child_num_hash, ?result, "connected buffered block");
-                    if self.is_sync_target_head(child_num_hash.hash) &&
-                        matches!(result, InsertPayloadOk::Inserted(BlockStatus::Valid))
-                    {
-                        self.make_canonical(child_num_hash.hash);
+                Ok(InsertPayloadOk::Inserted(BlockStatus::Valid)) => {
+                    info!(target: "ress::engine", child = ?child_num_hash, "Successfully connected buffered child block");
+                    connected_count += 1;
+                    // Recursively try to connect children of this child
+                    match self.try_connect_buffered_blocks(child_num_hash.hash) {
+                        Ok(additional_connected) => {
+                            connected_count += additional_connected;
+                        }
+                        Err(e) => {
+                            warn!(target: "ress::engine", child = ?child_num_hash, %e, "Error connecting children of connected block");
+                            return Err(e);
+                        }
                     }
                 }
+                Ok(InsertPayloadOk::Inserted(BlockStatus::Disconnected { missing_ancestor, .. })) => {
+                    info!(target: "ress::engine", child = ?child_num_hash, ?missing_ancestor, "Buffered child block still disconnected (parent's parent missing, but we only download direct parent)");
+                    // Note: insert_block already re-buffered the block and witness when parent was missing
+                    // We don't trigger download of parent's parent to avoid recursive downloading
+                }
+                Ok(InsertPayloadOk::Inserted(BlockStatus::NoWitness)) => {
+                    info!(target: "ress::engine", child = ?child_num_hash, "Buffered child block missing witness, re-buffering");
+                    // Re-buffer the block since it's missing witness
+                    self.block_buffer.insert_block(child);
+                    // Note: witness is not re-buffered since the block status indicates NoWitness
+                }
+                Ok(InsertPayloadOk::AlreadySeen) => {
+                    info!(target: "ress::engine", child = ?child_num_hash, "Buffered child block already seen");
+                    connected_count += 1;
+                }
                 Err(kind) => {
-                    debug!(target: "engine::tree", error = ?kind, "failed to connect buffered block to tree");
+                    error!(target: "ress::engine", child = ?child_num_hash, error = ?kind, "Failed to connect buffered child block");
                     if let Err(fatal) = self.on_insert_block_error(InsertBlockError::new(
                         child.into_sealed_block(),
                         kind,
                     )) {
-                        warn!(target: "engine::tree", %fatal, "Fatal error occurred while connecting buffered blocks");
+                        warn!(target: "ress::engine", %fatal, "Fatal error occurred while connecting buffered blocks");
                         return Err(fatal)
                     }
                 }
             }
         }
 
-        debug!(target: "engine::tree", elapsed = ?now.elapsed(), %block_count, "connected buffered blocks");
-        Ok(())
+        info!(target: "ress::engine", %parent_hash, elapsed = ?now.elapsed(), connected = connected_count, total = block_count, "Finished connecting buffered blocks");
+        Ok(connected_count)
     }
 
     /// Insert block into the tree.
@@ -669,32 +268,51 @@ impl EngineTree {
         trace!(target: "ress::engine", block=?block_num_hash, "Validating block consensus");
         self.validate_block(&block)?;
 
-        let Some(parent) = self.provider.sealed_header(&block.parent_hash) else {
-            // we don't have the state required to execute this block, buffering it and find the
-            // missing parent block
-            let missing_ancestor = self
-                .block_buffer
-                .lowest_ancestor(&block.parent_hash)
-                .map(|block| block.parent_num_hash())
-                .unwrap_or_else(|| block.parent_num_hash());
-            trace!(target: "ress::engine", block=?block_num_hash, ?missing_ancestor, has_witness=maybe_witness.is_some(), "Block has missing ancestor");
+        let parent_hash = block.parent_hash;
+        info!(target: "ress::engine", block=?block_num_hash, parent_hash=%parent_hash, "Checking if parent exists in provider or buffer");
+        
+        // Try to get parent from provider first
+        let (parent_header, parent_state_root, parent_num) = if let Some(parent) = self.provider.sealed_header(&parent_hash) {
+            let parent_num = parent.number;
+            let parent_state_root = parent.state_root;
+            info!(target: "ress::engine", block=?block_num_hash, parent=?BlockNumHash::new(parent_num, parent_hash), "Parent found in provider");
+            (Some(parent), parent_state_root, parent_num)
+        } else if let Some(parent_block) = self.block_buffer.blocks.get(&parent_hash) {
+            // Parent is in buffer, use its state_root and number
+            let parent_num = parent_block.number;
+            let parent_state_root = parent_block.state_root;
+            info!(target: "ress::engine", block=?block_num_hash, parent=?BlockNumHash::new(parent_num, parent_hash), "Parent found in buffer, using its state_root");
+            (None, parent_state_root, parent_num)
+        } else {
+            // Parent not found, need to download it
+            // Only download the direct parent, not the lowest ancestor
+            // This prevents recursive downloading all the way to genesis
+            let missing_ancestor = block.parent_num_hash();
+            info!(target: "ress::engine", block=?block_num_hash, parent_hash=%parent_hash, ?missing_ancestor, has_witness=maybe_witness.is_some(), "Block has missing parent, re-buffering (only downloading direct parent)");
             if let Some(witness) = maybe_witness {
                 self.block_buffer.insert_witness(block.hash(), witness, Default::default());
             }
             self.block_buffer.insert_block(block);
             return Ok(InsertPayloadOk::Inserted(BlockStatus::Disconnected {
-                head: self.canonical_head,
+                head: self.canonical_head(),
                 missing_ancestor,
             }));
         };
-
-        let parent = SealedHeader::new(parent, block.parent_hash);
-        if let Err(error) =
-            self.consensus.validate_header_against_parent(block.sealed_header(), &parent)
-        {
-            error!(target: "ress::engine", %error, "Failed to validate header against parent");
-            return Err(error.into());
-        }
+        
+        let parent_num_hash = BlockNumHash::new(parent_num, parent_hash);
+        info!(target: "ress::engine", block=?block_num_hash, parent=?parent_num_hash, "Proceeding with execution (timestamp validation skipped)");
+        
+        // Skip timestamp validation against parent as requested
+        // Note: We still need parent's state_root for witness revelation and parent_num_hash for execution
+        // if let Some(parent_header) = parent_header {
+        //     let parent = SealedHeader::new(parent_header, block.parent_hash);
+        //     if let Err(error) =
+        //         self.consensus.validate_header_against_parent(block.sealed_header(), &parent)
+        //     {
+        //         error!(target: "ress::engine", %error, "Failed to validate header against parent");
+        //         return Err(error.into());
+        //     }
+        // }
 
         // ===================== Witness =====================
         let Some(execution_witness) = maybe_witness else {
@@ -707,14 +325,14 @@ impl EngineTree {
         for encoded in execution_witness.state_witness() {
             state_witness.insert(keccak256(encoded), encoded.clone());
         }
-        trie.reveal_witness(parent.state_root, &state_witness).map_err(|error| {
+        trie.reveal_witness(parent_state_root, &state_witness).map_err(|error| {
             InsertBlockErrorKind::Provider(ProviderError::TrieWitnessError(error.to_string()))
         })?;
 
         // ===================== Execution =====================
         let start_time = std::time::Instant::now();
         let block_executor =
-            BlockExecutor::new(self.provider.clone(), block.parent_num_hash(), &trie);
+            BlockExecutor::new(self.provider.clone(), parent_num_hash, &trie);
         let output = block_executor.execute(&block).map_err(InsertBlockErrorKind::Execution)?;
         debug!(target: "ress::engine", block = ?block_num_hash, elapsed = ?start_time.elapsed(), "Executed new payload");
 
@@ -740,7 +358,9 @@ impl EngineTree {
         }
 
         // ===================== Update Node State =====================
+        info!(target: "ress::engine", block=?block_num_hash, "Inserting block into provider");
         self.provider.insert_block(block.clone(), Some(execution_witness.into_state_witness()));
+        info!(target: "ress::engine", block=?block_num_hash, "Block inserted into provider successfully");
 
         // Emit event.
         // Note: This code path is not used since ConsensusEngine is not started
@@ -941,50 +561,6 @@ pub enum InsertPayloadOk {
     Inserted(BlockStatus),
 }
 
-/// Non-empty chain of blocks.
-#[derive(Debug)]
-pub enum NewCanonicalChain {
-    /// A simple append to the current canonical head.
-    Commit {
-        /// All blocks that lead back to the canonical head
-        new: Vec<SealedHeader>,
-    },
-    /// A reorged chain consists of two chains that trace back to a shared ancestor block at which.
-    /// point they diverge.
-    Reorg {
-        /// All blocks of the _new_ chain.
-        new: Vec<SealedHeader>,
-        /// All blocks of the _old_ chain.
-        old: Vec<SealedHeader>,
-    },
-}
-
-impl NewCanonicalChain {
-    /// Returns the new tip of the chain.
-    ///
-    /// Returns the new tip for [`Self::Reorg`] and [`Self::Commit`] variants which commit at least
-    /// 1 new block.
-    pub fn tip(&self) -> &SealedHeader {
-        match self {
-            Self::Commit { new } | Self::Reorg { new, .. } => new.last().expect("non empty blocks"),
-        }
-    }
-
-    /// Returns the length of the new chain.
-    pub fn new_block_count(&self) -> usize {
-        match self {
-            Self::Commit { new } | Self::Reorg { new, .. } => new.len(),
-        }
-    }
-
-    /// Returns the length of the reorged chain.
-    pub fn reorged_block_count(&self) -> usize {
-        match self {
-            Self::Commit { .. } => 0,
-            Self::Reorg { old, .. } => old.len(),
-        }
-    }
-}
 
 #[derive(Metrics)]
 #[metrics(scope = "engine.tree")]

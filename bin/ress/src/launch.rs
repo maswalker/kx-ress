@@ -1,4 +1,5 @@
 use alloy_primitives::keccak256;
+use ress_engine::engine::ExecuteEngine;
 use ress_network::{RessNetworkHandle, RessNetworkManager};
 use ress_provider::{RessDatabase, RessProvider};
 use reth_network::{
@@ -7,12 +8,15 @@ use reth_network::{
 };
 use reth_network_peers::TrustedPeer;
 use reth_node_core::primitives::Bytecode;
+use reth_node_ethereum::consensus::EthBeaconConsensus;
+use reth_primitives::{Block, BlockBody, RecoveredBlock, SealedBlock, SealedHeader};
 use reth_ress_protocol::{NodeType, ProtocolState, RessProtocolHandler, RessProtocolProvider};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::*;
 
+use crate::api::ApiState;
 use crate::cli::RessArgs;
 
 /// The human readable name of the client
@@ -51,11 +55,20 @@ impl NodeLauncher {
         let provider = RessProvider::new(Arc::new(self.args.chain.inner.clone()), database.clone());
 
         // Insert genesis block.
-        // TODO: Fix RecoveredBlock creation - temporarily commented out to allow compilation
-        // The genesis block insertion logic needs to be updated for reth 1.9.3 API
+        // Genesis block doesn't need execution, but we need to insert it as a full block
+        // so that child blocks can find it via sealed_header()
         let genesis_header = self.args.chain.inner.genesis_header.clone();
         let genesis_hash = genesis_header.hash();
-        // provider.insert_block(...);
+        
+        // Create a RecoveredBlock from the genesis header and empty body
+        // genesis_header is already a SealedHeader, so we can use it directly
+        let empty_body = BlockBody::default();
+        let sealed_block: SealedBlock = SealedBlock::from_sealed_parts(genesis_header, empty_body);
+        let genesis_block: RecoveredBlock<Block> = sealed_block.try_recover()
+            .map_err(|e| eyre::eyre!("Failed to recover genesis block: {}", e))?;
+        
+        // Insert the full genesis block (no witness needed for genesis)
+        provider.insert_block(genesis_block, None);
         provider.insert_canonical_hash(0, genesis_hash);
         info!(target: "ress", %genesis_hash, "Inserted genesis block");
         for account in self.args.chain.inner.genesis.alloc.values() {
@@ -80,8 +93,68 @@ impl NodeLauncher {
             .await?;
         info!(target: "ress", peer_id = %network_handle.inner().peer_id(), "Network launched");
 
-        // TODO: Process block 47020
-        // This functionality will be implemented via HTTP API in the future
+        // Create consensus
+        let chain_spec = Arc::new(self.args.chain.inner.clone());
+        let consensus = EthBeaconConsensus::new(chain_spec.clone());
+
+        // Create ExecuteEngine
+        let execute_engine = ExecuteEngine::new(
+            provider.clone(),
+            network_handle.clone(),
+            consensus,
+        );
+        
+        // Create API state with ExecuteEngine
+        let api_state = ApiState::new(execute_engine);
+        
+        // Spawn ExecuteEngine in background (similar to original ress code)
+        // ExecuteEngine implements Future and needs to be polled continuously
+        let _execute_engine_handle = {
+            let engine = api_state.execute_engine.clone();
+            tokio::spawn(async move {
+                use std::pin::Pin;
+                use futures::Future;
+                loop {
+                    // Poll the engine in a separate scope to drop the lock quickly
+                    let poll_result = {
+                        let mut engine_guard = engine.lock().await;
+                        Pin::new(&mut *engine_guard).poll(&mut std::task::Context::from_waker(
+                            &futures::task::noop_waker()
+                        ))
+                    };
+                    
+                    match poll_result {
+                        std::task::Poll::Ready(Ok(())) => {
+                            // Engine completed successfully, but we want it to keep running
+                            warn!(target: "ress", "ExecuteEngine completed unexpectedly");
+                            break;
+                        }
+                        std::task::Poll::Ready(Err(e)) => {
+                            error!(target: "ress", error = %e, "ExecuteEngine error");
+                            break;
+                        }
+                        std::task::Poll::Pending => {
+                            // Continue polling after a short delay
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+            })
+        };
+
+        // Start HTTP API server
+        let api_state_for_server = api_state.clone();
+        info!(target: "ress", "Starting HTTP API server on 0.0.0.0:8080...");
+        tokio::spawn(async move {
+            let app = axum::Router::new()
+                .route("/execute_block", axum::routing::post(crate::api::execute_block))
+                .with_state(api_state_for_server);
+
+            let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+            info!(target: "ress", "HTTP API server listening on 0.0.0.0:8080");
+            axum::serve(listener, app).await.unwrap();
+        });
+
         info!(target: "ress", "Node started. Waiting for block execution requests...");
 
         // Keep the node running
@@ -117,10 +190,13 @@ impl NodeLauncher {
         };
         manager.add_rlpx_sub_protocol(protocol_handler.into_rlpx_sub_protocol());
 
+        let trusted_peers_count = trusted_peers.len();
         for trusted_peer in trusted_peers {
             let trusted_peer_addr = trusted_peer.resolve_blocking()?.tcp_addr();
+            info!(target: "ress", peer_id = %trusted_peer.id, addr = %trusted_peer_addr, "Adding trusted peer");
             manager.peers_handle().add_peer(trusted_peer.id, trusted_peer_addr);
         }
+        info!(target: "ress", trusted_peers_count, "Added all trusted peers");
 
         // get a handle to the network to interact with it
         let network_handle = manager.handle().clone();

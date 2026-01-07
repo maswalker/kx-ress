@@ -50,14 +50,18 @@ where
                 }
             }
 
-            // Compute root (in reth 1.9.3, root is computed automatically or via different method)
-            // The root will be computed when we insert the storage trie back
+            // Compute root for the storage trie (similar to reth 1.9.3 sparse_trie.rs:216)
+            // This ensures the storage trie root is available when we update the account
+            let _ = storage_trie.root();
 
             SparseStateTrieResult::Ok((address, storage_trie))
         })
         .for_each_init(
             || storage_tx.clone(),
-            |storage_tx, result| storage_tx.send(result).unwrap(),
+            |storage_tx, result| {
+                // Handle send error gracefully (receiver may be dropped)
+                let _ = storage_tx.send(result);
+            },
         );
     drop(storage_tx);
     for result in storage_rx {
@@ -73,13 +77,16 @@ where
     {
         let nibbles = Nibbles::unpack(hashed_address);
         let account = account.unwrap_or_default();
-        let storage_root = if let Some(storage_trie) = trie.storage_trie_mut(&hashed_address) {
-            // In reth 1.9.3, storage root is computed automatically
-            // We'll get it after inserting the storage trie
-            EMPTY_ROOT_HASH // Placeholder - will be updated when storage trie is inserted
+        // Get storage root: if storage trie exists, get its root; otherwise use existing or empty
+        // Similar to reth 1.9.3 state.rs:726-741 (update_account method)
+        let storage_root = if trie.storage_trie_mut(&hashed_address).is_some() {
+            // Storage trie was updated, get its root (similar to reth 1.9.3)
+            trie.storage_root(hashed_address).unwrap_or(EMPTY_ROOT_HASH)
         } else if let Some(value) = trie.get_account_value(&hashed_address) {
+            // Account exists, use its current storage root
             TrieAccount::decode(&mut &value[..])?.storage_root
         } else {
+            // New account with no storage
             EMPTY_ROOT_HASH
         };
 

@@ -74,8 +74,15 @@ impl FetchFullBlockFuture {
         let hash = self.block_hash;
         Box::pin(async move {
             tokio::time::sleep(delay).await;
+            info!(target: "ress::engine::downloader", %hash, "Sending header request to network");
             let request = GetHeaders { start_hash: hash, limit: 1 };
-            network.fetch_headers(request).await.map(|res| res.into_iter().next())
+            let result = network.fetch_headers(request).await.map(|res| res.into_iter().next());
+            match &result {
+                Ok(Some(_)) => info!(target: "ress::engine::downloader", %hash, "Header request succeeded"),
+                Ok(None) => warn!(target: "ress::engine::downloader", %hash, "Header request returned None"),
+                Err(e) => error!(target: "ress::engine::downloader", %hash, error = %e, "Header request failed"),
+            }
+            result
         })
     }
 
@@ -84,8 +91,15 @@ impl FetchFullBlockFuture {
         let hash = self.block_hash;
         Box::pin(async move {
             tokio::time::sleep(delay).await;
+            info!(target: "ress::engine::downloader", %hash, "Sending body request to network");
             let request = Vec::from([hash]);
-            network.fetch_block_bodies(request).await.map(|res| res.into_iter().next())
+            let result = network.fetch_block_bodies(request).await.map(|res| res.into_iter().next());
+            match &result {
+                Ok(Some(_)) => info!(target: "ress::engine::downloader", %hash, "Body request succeeded"),
+                Ok(None) => warn!(target: "ress::engine::downloader", %hash, "Body request returned None"),
+                Err(e) => error!(target: "ress::engine::downloader", %hash, error = %e, "Body request failed"),
+            }
+            result
         })
     }
 
@@ -94,16 +108,17 @@ impl FetchFullBlockFuture {
             Ok(Some(header)) => {
                 let header = SealedHeader::seal_slow(header);
                 if header.hash() == self.block_hash {
+                    info!(target: "ress::engine::downloader", block_hash = %self.block_hash, header_hash = %header.hash(), "Header received and matches");
                     self.header = Some(header);
                 } else {
-                    trace!(target: "ress::engine::downloader", expected = %self.block_hash, received = %header.hash(), "Received wrong header");
+                    warn!(target: "ress::engine::downloader", expected = %self.block_hash, received = %header.hash(), "Received wrong header");
                 }
             }
             Ok(None) => {
-                trace!(target: "ress::engine::downloader", block_hash = %self.block_hash, "No header received");
+                warn!(target: "ress::engine::downloader", block_hash = %self.block_hash, "No header received");
             }
             Err(error) => {
-                trace!(target: "ress::engine::downloader", %error, %self.block_hash, "Header download failed");
+                error!(target: "ress::engine::downloader", %error, %self.block_hash, "Header download failed");
             }
         };
     }
@@ -111,13 +126,14 @@ impl FetchFullBlockFuture {
     fn on_body_response(&mut self, response: Result<Option<BlockBody>, PeerRequestError>) {
         match response {
             Ok(Some(body)) => {
+                info!(target: "ress::engine::downloader", block_hash = %self.block_hash, "Body received");
                 self.body = Some(body);
             }
             Ok(None) => {
-                trace!(target: "ress::engine::downloader", block_hash = %self.block_hash, "No body received");
+                warn!(target: "ress::engine::downloader", block_hash = %self.block_hash, "No body received");
             }
             Err(error) => {
-                trace!(target: "ress::engine::downloader", %error, %self.block_hash, "Body download failed");
+                error!(target: "ress::engine::downloader", %error, %self.block_hash, "Body download failed");
             }
         }
     }
@@ -156,14 +172,17 @@ impl Future for FetchFullBlockFuture {
                 let header = this.header.take().unwrap();
                 let body = this.body.take().unwrap();
 
+                info!(target: "ress::engine::downloader", block_hash = %this.block_hash, "Both header and body ready, validating...");
+
                 // ensure the block is valid, else retry
                 if let Err(error) = <EthBeaconConsensus<ChainSpec> as Consensus<Block>>::validate_body_against_header(&this.consensus, &body, &header) {
-                    trace!(target: "ress::engine::downloader", %error, hash = %header.hash(), "Received wrong body");
+                    warn!(target: "ress::engine::downloader", %error, hash = %header.hash(), "Body validation failed, retrying");
                     this.header = Some(header);
                     this.pending_body_request = Some(this.body_request(this.retry_delay));
                     continue
                 }
 
+                info!(target: "ress::engine::downloader", block_hash = %this.block_hash, "Block validation passed, returning SealedBlock");
                 return Poll::Ready(SealedBlock::from_sealed_parts(header, body))
             }
 

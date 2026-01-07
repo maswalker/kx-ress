@@ -57,7 +57,7 @@ impl EngineDownloader {
             return
         }
 
-        debug!(target: "ress::engine::downloader", %block_hash, "Downloading full block");
+        info!(target: "ress::engine::downloader", %block_hash, "Downloading full block");
         let fut = FetchFullBlockFuture::new(
             self.network.clone(),
             self.consensus.clone(),
@@ -65,6 +65,7 @@ impl EngineDownloader {
             block_hash,
         );
         self.inflight_full_block_requests.push(fut);
+        info!(target: "ress::engine::downloader", %block_hash, inflight_requests = self.inflight_full_block_requests.len(), "Full block download request queued");
         self.metrics.inc_total(RequestMetricTy::FullBlock);
         self.metrics.set_inflight(RequestMetricTy::FullBlock, self.inflight_witness_requests.len());
     }
@@ -88,9 +89,10 @@ impl EngineDownloader {
             return
         }
 
-        debug!(target: "ress::engine::downloader", %block_hash, "Downloading witness");
+        info!(target: "ress::engine::downloader", %block_hash, "Downloading witness");
         let fut = FetchWitnessFuture::new(self.network.clone(), self.retry_delay, block_hash);
         self.inflight_witness_requests.push(fut);
+        info!(target: "ress::engine::downloader", %block_hash, inflight_requests = self.inflight_witness_requests.len(), "Witness download request queued");
         self.metrics.inc_total(RequestMetricTy::Witness);
         self.metrics.set_inflight(RequestMetricTy::Witness, self.inflight_witness_requests.len());
     }
@@ -118,6 +120,7 @@ impl EngineDownloader {
     /// Poll downloader.
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<DownloadOutcome> {
         if let Some(outcome) = self.outcomes.pop_front() {
+            trace!(target: "ress::engine::downloader", "Returning queued outcome");
             return Poll::Ready(outcome)
         }
 
@@ -145,7 +148,7 @@ impl EngineDownloader {
             if let Poll::Ready(block) = request.poll_unpin(cx) {
                 let elapsed = request.elapsed();
                 self.metrics.record_elapsed(RequestMetricTy::FullBlock, elapsed);
-                trace!(target: "ress::engine::downloader", block = ?block.num_hash(), ?elapsed, "Received single full block");
+                info!(target: "ress::engine::downloader", block = ?block.num_hash(), ?elapsed, "Received single full block");
                 self.outcomes
                     .push_back(DownloadOutcome::new(DownloadData::FullBlock(block), elapsed));
             } else {
@@ -161,7 +164,7 @@ impl EngineDownloader {
             if let Poll::Ready(witness) = request.poll_unpin(cx) {
                 let elapsed = request.elapsed();
                 self.metrics.record_elapsed(RequestMetricTy::Witness, elapsed);
-                trace!(target: "ress::engine::downloader", block_hash = %request.block_hash(), ?elapsed, "Received witness");
+                info!(target: "ress::engine::downloader", block_hash = %request.block_hash(), ?elapsed, "Received witness");
                 self.outcomes.push_back(DownloadOutcome::new(
                     DownloadData::Witness(request.block_hash(), witness),
                     elapsed,
