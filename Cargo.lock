@@ -6367,6 +6367,7 @@ dependencies = [
  "alloy-eips",
  "alloy-network",
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-serde",
@@ -6376,6 +6377,7 @@ dependencies = [
  "dirs-next",
  "eyre",
  "futures",
+ "hex",
  "jsonrpsee",
  "jsonrpsee-server",
  "jsonrpsee-types",
@@ -6383,6 +6385,7 @@ dependencies = [
  "ress-engine",
  "ress-network",
  "ress-provider",
+ "ress-verifier",
  "reth-chainspec",
  "reth-cli",
  "reth-cli-util",
@@ -6508,8 +6511,10 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-trie 0.8.1",
+ "reth-primitives",
  "reth-trie",
  "serde",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -6530,6 +6535,34 @@ dependencies = [
  "reth-ress-protocol",
  "reth-storage-errors",
  "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "ress-verifier"
+version = "0.1.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rlp",
+ "itertools 0.14.0",
+ "rayon",
+ "ress-engine",
+ "ress-evm",
+ "ress-primitives",
+ "reth-chainspec",
+ "reth-consensus",
+ "reth-errors",
+ "reth-evm",
+ "reth-evm-ethereum",
+ "reth-node-ethereum",
+ "reth-primitives",
+ "reth-provider",
+ "reth-revm",
+ "reth-trie",
+ "reth-trie-common",
+ "reth-trie-sparse",
+ "thiserror 2.0.17",
  "tracing",
 ]
 

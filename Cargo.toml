@@ -16,6 +16,7 @@ members = [
     "crates/network",
     "crates/primitives",
     "crates/provider",
+    "crates/verifier",
 ]
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
@@ -74,6 +75,7 @@ ress-network = { path = "crates/network" }
 ress-provider = { path = "crates/provider" }
 ress-evm = { path = "crates/evm" }
 ress-primitives = { path = "crates/primitives" }
+ress-verifier = { path = "crates/verifier" }
 
 # reth ress
 reth-ress-protocol = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }

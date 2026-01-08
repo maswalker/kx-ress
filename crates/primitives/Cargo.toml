@@ -15,6 +15,8 @@ alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-trie.workspace = true
 reth-trie.workspace = true
+reth-primitives.workspace = true
+thiserror.workspace = true
 
 # `serde` feature
 serde = { workspace = true, optional = true }

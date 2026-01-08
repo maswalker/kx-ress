@@ -1,5 +1,5 @@
 use alloy_primitives::keccak256;
-use ress_engine::engine::ExecuteEngine;
+use ress_engine::engine::Engine;
 use ress_network::{RessNetworkHandle, RessNetworkManager};
 use ress_provider::{RessDatabase, RessProvider};
 use reth_network::{
@@ -9,7 +9,7 @@ use reth_network::{
 use reth_network_peers::TrustedPeer;
 use reth_node_core::primitives::Bytecode;
 use reth_node_ethereum::consensus::EthBeaconConsensus;
-use reth_primitives::{Block, BlockBody, RecoveredBlock, SealedBlock, SealedHeader};
+use reth_primitives::{Block, BlockBody, RecoveredBlock, SealedBlock};
 use reth_ress_protocol::{NodeType, ProtocolState, RessProtocolHandler, RessProtocolProvider};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -49,7 +49,6 @@ impl NodeLauncher {
 
         // Open database.
         let db_path = data_dir.db();
-        debug!(target: "ress", path = %db_path.display(), "Opening database");
         let database = RessDatabase::new(&db_path)?;
         info!(target: "ress", path = %db_path.display(), "Database opened");
         let provider = RessProvider::new(Arc::new(self.args.chain.inner.clone()), database.clone());
@@ -67,17 +66,14 @@ impl NodeLauncher {
         let genesis_block: RecoveredBlock<Block> = sealed_block.try_recover()
             .map_err(|e| eyre::eyre!("Failed to recover genesis block: {}", e))?;
         
-        // Insert the full genesis block (no witness needed for genesis)
         provider.insert_block(genesis_block, None);
         provider.insert_canonical_hash(0, genesis_hash);
-        info!(target: "ress", %genesis_hash, "Inserted genesis block");
         for account in self.args.chain.inner.genesis.alloc.values() {
             if let Some(code) = account.code.clone() {
                 let code_hash = keccak256(&code);
                 provider.insert_bytecode(code_hash, Bytecode::new_raw(code))?;
             }
         }
-        info!(target: "ress", %genesis_hash, "Inserted genesis bytecodes");
 
         // Launch network.
         let network_secret_path = self.args.network.network_secret_path(&data_dir);
@@ -97,18 +93,18 @@ impl NodeLauncher {
         let chain_spec = Arc::new(self.args.chain.inner.clone());
         let consensus = EthBeaconConsensus::new(chain_spec.clone());
 
-        // Create ExecuteEngine
-        let execute_engine = ExecuteEngine::new(
+        // Create Engine
+        let execute_engine = Engine::new(
             provider.clone(),
             network_handle.clone(),
             consensus,
         );
         
-        // Create API state with ExecuteEngine
-        let api_state = ApiState::new(execute_engine);
+        // Create API state with Engine and chain_spec
+        let api_state = ApiState::new(execute_engine, chain_spec.clone());
         
-        // Spawn ExecuteEngine in background (similar to original ress code)
-        // ExecuteEngine implements Future and needs to be polled continuously
+        // Spawn Engine in background (similar to original ress code)
+        // Engine implements Future and needs to be polled continuously
         let _execute_engine_handle = {
             let engine = api_state.execute_engine.clone();
             tokio::spawn(async move {
@@ -126,11 +122,11 @@ impl NodeLauncher {
                     match poll_result {
                         std::task::Poll::Ready(Ok(())) => {
                             // Engine completed successfully, but we want it to keep running
-                            warn!(target: "ress", "ExecuteEngine completed unexpectedly");
+                                warn!(target: "ress", "Engine completed unexpectedly");
                             break;
                         }
                         std::task::Poll::Ready(Err(e)) => {
-                            error!(target: "ress", error = %e, "ExecuteEngine error");
+                                error!(target: "ress", error = %e, "Engine error");
                             break;
                         }
                         std::task::Poll::Pending => {
@@ -142,9 +138,7 @@ impl NodeLauncher {
             })
         };
 
-        // Start HTTP API server
         let api_state_for_server = api_state.clone();
-        info!(target: "ress", "Starting HTTP API server on 0.0.0.0:8080...");
         tokio::spawn(async move {
             let app = axum::Router::new()
                 .route("/execute_block", axum::routing::post(crate::api::execute_block))
@@ -155,7 +149,7 @@ impl NodeLauncher {
             axum::serve(listener, app).await.unwrap();
         });
 
-        info!(target: "ress", "Node started. Waiting for block execution requests...");
+        info!(target: "ress", "Node started");
 
         // Keep the node running
         loop {
@@ -190,13 +184,10 @@ impl NodeLauncher {
         };
         manager.add_rlpx_sub_protocol(protocol_handler.into_rlpx_sub_protocol());
 
-        let trusted_peers_count = trusted_peers.len();
         for trusted_peer in trusted_peers {
             let trusted_peer_addr = trusted_peer.resolve_blocking()?.tcp_addr();
-            info!(target: "ress", peer_id = %trusted_peer.id, addr = %trusted_peer_addr, "Adding trusted peer");
             manager.peers_handle().add_peer(trusted_peer.id, trusted_peer_addr);
         }
-        info!(target: "ress", trusted_peers_count, "Added all trusted peers");
 
         // get a handle to the network to interact with it
         let network_handle = manager.handle().clone();

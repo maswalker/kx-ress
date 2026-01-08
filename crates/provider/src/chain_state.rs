@@ -91,6 +91,12 @@ impl ChainState {
         self.0.read().witnesses.get(hash).cloned()
     }
 
+    /// Insert witness for a block hash without requiring the block to exist
+    pub fn insert_witness(&self, block_hash: BlockHash, witness: Vec<Bytes>) {
+        let mut this = self.0.write();
+        this.witnesses.insert(block_hash, witness);
+    }
+
     pub fn insert_block(&self, block: RecoveredBlock<Block>, maybe_witness: Option<Vec<Bytes>>) {
         let mut this = self.0.write();
         let block_hash = block.hash();

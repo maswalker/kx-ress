@@ -1,10 +1,7 @@
 //! Stateless Ethereum execution layer node based on reth client.
 
-/// HTTP API for executing blocks.
+#![allow(missing_docs, missing_debug_implementations)]
+
 pub mod api;
-
-/// Ress CLI arguments.
 pub mod cli;
-
-/// Node launcher.
 pub mod launch;

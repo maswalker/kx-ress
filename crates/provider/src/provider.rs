@@ -48,6 +48,11 @@ impl RessProvider {
         self.chain_state.insert_block(block, maybe_witness);
     }
 
+    /// Insert witness for a block hash without requiring the block to exist
+    pub fn insert_witness(&self, block_hash: B256, witness: Vec<Bytes>) {
+        self.chain_state.insert_witness(block_hash, witness);
+    }
+
     pub fn bytecode_exists(&self, code_hash: B256) -> Result<bool, DatabaseError> {
         self.database.bytecode_exists(code_hash)
     }
