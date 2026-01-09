@@ -17,6 +17,10 @@ ress-provider.workspace = true
 ress-evm.workspace = true
 ress-network.workspace = true
 
+# kasplex-reth
+kasplex-reth-consensus.workspace = true
+kasplex-reth-chainspec.workspace = true
+
 # reth
 reth-ress-protocol.workspace = true
 reth-primitives.workspace = true

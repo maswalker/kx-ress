@@ -1,10 +1,9 @@
+use crate::consensus::ConsensusWrapper;
 use crate::download::{DownloadData, DownloadOutcome, EngineDownloader};
 use crate::task::{TaskManager, TaskResult, TaskError, TaskRequest};
 use ress_network::RessNetworkHandle;
 use ress_primitives::execution::{ExecutionResult, ExecuteEngineError};
 use ress_provider::RessProvider;
-use reth_chainspec::ChainSpec;
-use reth_node_ethereum::consensus::EthBeaconConsensus;
 use std::{
     future::Future,
     pin::Pin,
@@ -22,7 +21,7 @@ impl Engine {
     pub fn new(
         provider: RessProvider,
         network: RessNetworkHandle,
-        consensus: EthBeaconConsensus<ChainSpec>,
+        consensus: ConsensusWrapper,
     ) -> Self {
         let task_manager = TaskManager::new(
             provider,

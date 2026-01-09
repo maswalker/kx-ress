@@ -166,6 +166,12 @@ reth-codecs = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 
 # kasplex-reth chainspec
 kasplex-reth-chainspec = { path = "../kasplex-reth/crates/chainspec" }
+# kasplex-reth evm (for KasplexEvmHandler)
+kasplex-reth-evm = { path = "../kasplex-reth/crates/evm" }
+# kasplex-reth consensus (for KasplexBeaconConsensus)
+kasplex-reth-consensus = { path = "../kasplex-reth/crates/consensus" }
+# kasplex-reth block (for KasplexBlockExecutorFactory)
+kasplex-reth-block = { path = "../kasplex-reth/crates/block" }
 
 # alloy
 alloy-primitives = { version = "1.4.1", default-features = false, features = [

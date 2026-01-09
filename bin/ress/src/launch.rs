@@ -8,7 +8,6 @@ use reth_network::{
 };
 use reth_network_peers::TrustedPeer;
 use reth_node_core::primitives::Bytecode;
-use reth_node_ethereum::consensus::EthBeaconConsensus;
 use reth_primitives::{Block, BlockBody, RecoveredBlock, SealedBlock};
 use reth_ress_protocol::{NodeType, ProtocolState, RessProtocolHandler, RessProtocolProvider};
 use std::sync::Arc;
@@ -51,7 +50,8 @@ impl NodeLauncher {
         let db_path = data_dir.db();
         let database = RessDatabase::new(&db_path)?;
         info!(target: "ress", path = %db_path.display(), "Database opened");
-        let provider = RessProvider::new(Arc::new(self.args.chain.inner.clone()), database.clone());
+        // Create provider with KasplexChainSpec to enable Kasplex-specific features
+        let provider = RessProvider::from_kasplex_chain_spec(self.args.chain.clone(), database.clone());
 
         // Insert genesis block.
         // Genesis block doesn't need execution, but we need to insert it as a full block
@@ -89,9 +89,11 @@ impl NodeLauncher {
             .await?;
         info!(target: "ress", peer_id = %network_handle.inner().peer_id(), "Network launched");
 
-        // Create consensus
+        // Create consensus - use KasplexBeaconConsensus for Kasplex chains
         let chain_spec = Arc::new(self.args.chain.inner.clone());
-        let consensus = EthBeaconConsensus::new(chain_spec.clone());
+        let consensus = ress_engine::ConsensusWrapper::from_kasplex_chain_spec(
+            self.args.chain.clone()
+        );
 
         // Create Engine
         let execute_engine = Engine::new(

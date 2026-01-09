@@ -1,6 +1,7 @@
 use crate::{chain_state::ChainState, database::RessDatabase};
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{map::B256HashSet, BlockHash, BlockNumber, Bytes, B256};
+use kasplex_reth_chainspec::spec::KasplexChainSpec;
 use reth_chainspec::ChainSpec;
 use reth_db::DatabaseError;
 use reth_primitives::{Block, BlockBody, Bytecode, Header, RecoveredBlock, SealedHeader};
@@ -11,17 +12,42 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct RessProvider {
     chain_spec: Arc<ChainSpec>,
+    kasplex_chain_spec: Option<Arc<KasplexChainSpec>>,
     database: RessDatabase,
     chain_state: ChainState,
 }
 
 impl RessProvider {
     pub fn new(chain_spec: Arc<ChainSpec>, database: RessDatabase) -> Self {
-        Self { chain_spec, database, chain_state: ChainState::default() }
+        Self { 
+            chain_spec, 
+            kasplex_chain_spec: None,
+            database, 
+            chain_state: ChainState::default() 
+        }
+    }
+
+    /// Create a new RessProvider from a KasplexChainSpec.
+    pub fn from_kasplex_chain_spec(
+        kasplex_chain_spec: Arc<KasplexChainSpec>,
+        database: RessDatabase,
+    ) -> Self {
+        let chain_spec = Arc::new(kasplex_chain_spec.inner.clone());
+        Self {
+            chain_spec,
+            kasplex_chain_spec: Some(kasplex_chain_spec),
+            database,
+            chain_state: ChainState::default(),
+        }
     }
 
     pub fn chain_spec(&self) -> Arc<ChainSpec> {
         self.chain_spec.clone()
+    }
+
+    /// Returns the KasplexChainSpec if this provider was created with one.
+    pub fn kasplex_chain_spec(&self) -> Option<Arc<KasplexChainSpec>> {
+        self.kasplex_chain_spec.clone()
     }
 
     pub fn is_hash_canonical(&self, hash: &BlockHash) -> bool {

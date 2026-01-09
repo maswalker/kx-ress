@@ -3,6 +3,9 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![allow(dead_code, unused_imports, missing_docs, unused_crate_dependencies, missing_debug_implementations)]
 
+/// Consensus wrapper supporting both Ethereum and Kasplex.
+pub mod consensus;
+
 /// Engine downloader.
 pub mod download;
 
@@ -11,3 +14,5 @@ pub mod engine;
 
 /// Task management for block verification.
 pub mod task;
+
+pub use consensus::ConsensusWrapper;

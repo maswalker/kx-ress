@@ -23,6 +23,9 @@ reth-storage-errors.workspace = true
 reth-db = { workspace = true, features = ["mdbx"] }
 reth-db-api.workspace = true
 
+# kasplex-reth
+kasplex-reth-chainspec.workspace = true
+
 # misc
 parking_lot.workspace = true
 eyre.workspace = true

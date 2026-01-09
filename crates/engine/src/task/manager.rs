@@ -1,4 +1,5 @@
 
+use crate::consensus::ConsensusWrapper;
 use crate::download::{DownloadData, DownloadOutcome, EngineDownloader};
 use crate::task::{BlockBuffer, Task, TaskState, TaskResult, TaskError, TaskId, TaskRequest, calculate_state_root};
 use alloy_primitives::{keccak256, map::B256Map, B256};
@@ -7,10 +8,9 @@ use ress_evm::BlockExecutor;
 use ress_primitives::witness::ExecutionWitness;
 use ress_provider::RessProvider;
 use reth_chainspec::ChainSpec;
-use reth_consensus::{Consensus, FullConsensus};
+use reth_consensus::FullConsensus;
 use reth_primitives::{Bytecode, EthPrimitives};
 use alloy_primitives::BlockNumber;
-use reth_node_ethereum::consensus::EthBeaconConsensus;
 use reth_primitives::{Block, RecoveredBlock};
 use reth_trie::{HashedPostState, KeccakKeyHasher};
 use reth_trie_sparse::{provider::DefaultTrieNodeProviderFactory, SparseStateTrie};
@@ -25,7 +25,7 @@ const BLOCK_BUFFER_SIZE: u32 = 256;
 pub struct TaskManager {
     provider: RessProvider,
     downloader: EngineDownloader,
-    consensus: EthBeaconConsensus<ChainSpec>,
+    consensus: ConsensusWrapper,
     block_buffer: BlockBuffer<Block>,
     tasks: HashMap<TaskId, Task>,
     next_task_id: AtomicU64,
@@ -37,9 +37,17 @@ impl TaskManager {
     pub fn new(
         provider: RessProvider,
         network: ress_network::RessNetworkHandle,
-        consensus: EthBeaconConsensus<ChainSpec>,
+        consensus: ConsensusWrapper,
     ) -> Self {
-        let downloader = EngineDownloader::new(network, consensus.clone());
+        // For downloader, we need to pass the consensus to it
+        // EngineDownloader might need a specific type, let's check what it needs
+        // For now, we'll create a temporary EthBeaconConsensus for the downloader
+        // TODO: Update EngineDownloader to accept ConsensusWrapper if needed
+        use reth_chainspec::ChainSpec;
+        use reth_node_ethereum::consensus::EthBeaconConsensus;
+        let chain_spec = provider.chain_spec();
+        let eth_consensus = EthBeaconConsensus::new(chain_spec);
+        let downloader = EngineDownloader::new(network, eth_consensus);
         Self {
             provider,
             downloader,
@@ -396,7 +404,7 @@ impl TaskManager {
             }
         }
         
-        let calculated_state_root = self.verify_block(block, witness, parent_block.state_root)?;
+        let calculated_state_root = self.verify_block(block, &parent_block, witness, parent_block.state_root)?;
         
         if calculated_state_root != block.state_root {
             return Err(TaskError::StateRootMismatch {
@@ -422,9 +430,36 @@ impl TaskManager {
     fn verify_block(
         &self,
         block: &RecoveredBlock<Block>,
+        parent_block: &RecoveredBlock<Block>,
         witness: &ExecutionWitness,
         parent_state_root: B256,
     ) -> Result<B256, TaskError> {
+        // Validate timestamp for Kasplex chains
+        // Kasplex allows block.timestamp == parent.timestamp (unlike standard Ethereum)
+        // Skip validation for genesis block (block.number == 0)
+        if block.number > 0 {
+            match &self.consensus {
+                ConsensusWrapper::Kasplex(_) => {
+                    // Kasplex allows timestamp == parent.timestamp
+                    if block.timestamp < parent_block.timestamp {
+                        return Err(TaskError::ExecutionError(format!(
+                            "Block timestamp {} is less than parent timestamp {}",
+                            block.timestamp, parent_block.timestamp
+                        )));
+                    }
+                }
+                ConsensusWrapper::Ethereum(_) => {
+                    // Standard Ethereum requires timestamp > parent.timestamp
+                    if block.timestamp <= parent_block.timestamp {
+                        return Err(TaskError::ExecutionError(format!(
+                            "Block timestamp {} must be greater than parent timestamp {}",
+                            block.timestamp, parent_block.timestamp
+                        )));
+                    }
+                }
+            }
+        }
+        
         let mut trie = SparseStateTrie::default();
         let mut state_witness = B256Map::default();
         for encoded in witness.state_witness() {
@@ -441,7 +476,7 @@ impl TaskManager {
         let output = block_executor.execute(block)
             .map_err(|e| TaskError::ExecutionError(format!("Block execution failed: {}", e)))?;
         
-        <EthBeaconConsensus<ChainSpec> as FullConsensus<EthPrimitives>>::validate_block_post_execution(
+        <ConsensusWrapper as FullConsensus<EthPrimitives>>::validate_block_post_execution(
             &self.consensus,
             block,
             &output.result
