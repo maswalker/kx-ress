@@ -2,7 +2,6 @@
 
 use alloy_primitives::{Address, U256};
 use reth_chainspec::ChainSpec;
-use reth_primitives::BlockHeader;
 use std::str::FromStr;
 
 /// Calculate the vault address for a Kasplex chain based on chain ID.
@@ -68,7 +67,7 @@ pub fn validate_timestamp_for_kasplex(
 }
 
 /// Calculate total base fee collected from all transactions in a block.
-pub fn calculate_total_base_fee(
+pub(crate) fn calculate_total_base_fee(
     gas_used: u64,
     base_fee_per_gas: Option<u64>,
 ) -> U256 {
@@ -95,10 +94,8 @@ pub(crate) fn adjust_base_fee_for_kasplex_impl(
     block: &reth_primitives::RecoveredBlock<reth_primitives::Block>,
     chain_spec: &ChainSpec,
 ) -> Result<(), String> {
-    use alloy_primitives::keccak256;
-    use reth_trie::Account;
-    use reth_revm::state::AccountInfo;
-    use reth_primitives::B256;
+    use alloy_primitives::{keccak256, B256};
+    use reth_primitives::Account;
 
     // Calculate total base fee collected
     let base_fee_per_gas = block.base_fee_per_gas.unwrap_or(0);
@@ -122,13 +119,13 @@ pub(crate) fn adjust_base_fee_for_kasplex_impl(
     let beneficiary_balance = beneficiary_account
         .as_ref()
         .and_then(|acc| acc.as_ref())
-        .map(|acc| acc.info.balance)
+        .map(|acc| acc.balance)
         .unwrap_or(U256::ZERO);
     
     let vault_balance = vault_account
         .as_ref()
         .and_then(|acc| acc.as_ref())
-        .map(|acc| acc.info.balance)
+        .map(|acc| acc.balance)
         .unwrap_or(U256::ZERO);
 
     // Transfer base fee from beneficiary to vault
@@ -138,17 +135,13 @@ pub(crate) fn adjust_base_fee_for_kasplex_impl(
     // Update beneficiary account
     if let Some(account) = hashed_state.accounts.get_mut(&hashed_beneficiary) {
         if let Some(ref mut acc) = account {
-            acc.info.balance = new_beneficiary_balance;
+            acc.balance = new_beneficiary_balance;
         } else {
             // Create new account if it doesn't exist (shouldn't happen for beneficiary)
             *account = Some(Account {
-                info: AccountInfo {
-                    balance: new_beneficiary_balance,
-                    nonce: 0,
-                    code_hash: B256::ZERO,
-                    code: None,
-                },
-                storage: Default::default(),
+                balance: new_beneficiary_balance,
+                nonce: 0,
+                bytecode_hash: Some(B256::ZERO),
             });
         }
     } else {
@@ -156,42 +149,30 @@ pub(crate) fn adjust_base_fee_for_kasplex_impl(
         // We still need to modify it, so we need to load it from the trie or mark it as changed
         // For now, we'll create a new entry
         hashed_state.accounts.insert(hashed_beneficiary, Some(Account {
-            info: AccountInfo {
-                balance: new_beneficiary_balance,
-                nonce: 0,
-                code_hash: B256::ZERO,
-                code: None,
-            },
-            storage: Default::default(),
+            balance: new_beneficiary_balance,
+            nonce: 0,
+            bytecode_hash: Some(B256::ZERO),
         }));
     }
 
     // Update vault account
     if let Some(account) = hashed_state.accounts.get_mut(&hashed_vault) {
         if let Some(ref mut acc) = account {
-            acc.info.balance = new_vault_balance;
+            acc.balance = new_vault_balance;
         } else {
             // Create new account if it doesn't exist
             *account = Some(Account {
-                info: AccountInfo {
-                    balance: new_vault_balance,
-                    nonce: 0,
-                    code_hash: B256::ZERO,
-                    code: None,
-                },
-                storage: Default::default(),
+                balance: new_vault_balance,
+                nonce: 0,
+                bytecode_hash: Some(B256::ZERO),
             });
         }
     } else {
         // Vault account not in state changes, create new entry
         hashed_state.accounts.insert(hashed_vault, Some(Account {
-            info: AccountInfo {
-                balance: new_vault_balance,
-                nonce: 0,
-                code_hash: B256::ZERO,
-                code: None,
-            },
-            storage: Default::default(),
+            balance: new_vault_balance,
+            nonce: 0,
+            bytecode_hash: Some(B256::ZERO),
         }));
     }
 

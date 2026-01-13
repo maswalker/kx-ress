@@ -3,21 +3,21 @@
 use crate::provider::{VerifierDatabase, VerifierProvider};
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{keccak256, map::B256Map, B256};
+use ress_evm::EvmConfigWrapper;
 use ress_primitives::execution::ExecutionResult;
+use kasplex_reth_chainspec::spec::KasplexChainSpec;
 use reth_chainspec::ChainSpec;
 use reth_consensus::FullConsensus;
 use reth_evm::{
     execute::BlockExecutor as _,
     ConfigureEvm,
 };
-use reth_evm_ethereum::EthEvmConfig;
 use reth_primitives::EthPrimitives;
 use reth_provider::BlockExecutionOutput;
 use reth_revm::db::{states::bundle_state::BundleRetention, State};
 use reth_trie::{HashedPostState, KeccakKeyHasher};
 use reth_trie_sparse::{provider::DefaultTrieNodeProviderFactory, SparseStateTrie};
 use std::sync::Arc;
-use tracing::*;
 
 // Import calculate_state_root from engine task module
 // We'll need to re-export or copy this function
@@ -53,12 +53,15 @@ pub enum VerificationError {
 /// # Arguments
 /// * `result` - The ExecutionResult to verify
 /// * `chain_spec` - The chain specification
+/// * `kasplex_chain_spec` - Optional Kasplex chain specification (for Kasplex chains)
 ///
 /// # Returns
 /// Ok(()) if verification succeeds, Err(VerificationError) otherwise
-pub fn verify(result: &ExecutionResult, chain_spec: Arc<ChainSpec>) -> Result<(), VerificationError> {
-    info!(target: "ress::verifier", block_hash = %result.block.hash(), "Starting verification");
-
+pub fn verify(
+    result: &ExecutionResult,
+    chain_spec: Arc<ChainSpec>,
+    kasplex_chain_spec: Option<Arc<KasplexChainSpec>>,
+) -> Result<(), VerificationError> {
     // Verify block hash equals header hash (Ethereum rule)
     // In Ethereum, block hash is the keccak256 hash of the block header
     let computed_block_hash = result.block.hash();
@@ -128,26 +131,63 @@ pub fn verify(result: &ExecutionResult, chain_spec: Arc<ChainSpec>) -> Result<()
         .with_bundle_update()
         .without_state_clear()
         .build();
-    let evm_config = EthEvmConfig::new(provider.chain_spec());
+
+    // Use EvmConfigWrapper to support both Ethereum and Kasplex chains
+    // For Kasplex chains, this will use KasplexEvmConfig which distributes base fees to treasury
+    let evm_config = if let Some(kasplex_chain_spec) = kasplex_chain_spec {
+        EvmConfigWrapper::from_kasplex_chain_spec(kasplex_chain_spec)
+    } else {
+        EvmConfigWrapper::from_ethereum_chain_spec(provider.chain_spec())
+    };
+
     let mut executor_state = state;
-    let mut strategy = evm_config
-        .executor_for_block(&mut executor_state, &result.block)
-        .map_err(|e| VerificationError::ExecutionError(format!("Failed to create executor: {}", e)))?;
 
-    // Execute block
-    strategy
-        .apply_pre_execution_changes()
-        .map_err(|e| VerificationError::ExecutionError(format!("Pre-execution failed: {}", e)))?;
+    // Execute block using the appropriate EVM config
+    let exec_result = match evm_config {
+        EvmConfigWrapper::Ethereum(config) => {
+            let mut strategy = config
+                .executor_for_block(&mut executor_state, &result.block)
+                .map_err(|e| VerificationError::ExecutionError(format!("Failed to create executor: {}", e)))?;
 
-    for tx in result.block.transactions_recovered() {
-        strategy
-            .execute_transaction(tx)
-            .map_err(|e| VerificationError::ExecutionError(format!("Transaction execution failed: {}", e)))?;
-    }
+            // Execute block
+            strategy
+                .apply_pre_execution_changes()
+                .map_err(|e| VerificationError::ExecutionError(format!("Pre-execution failed: {}", e)))?;
 
-    let exec_result = strategy
-        .apply_post_execution_changes()
-        .map_err(|e| VerificationError::ExecutionError(format!("Post-execution failed: {}", e)))?;
+            for tx in result.block.transactions_recovered() {
+                strategy
+                    .execute_transaction(tx)
+                    .map_err(|e| VerificationError::ExecutionError(format!("Transaction execution failed: {}", e)))?;
+            }
+
+            strategy
+                .apply_post_execution_changes()
+                .map_err(|e| VerificationError::ExecutionError(format!("Post-execution failed: {}", e)))?
+        }
+        EvmConfigWrapper::Kasplex(config) => {
+            // Use KasplexEvmConfig which uses KasplexBlockExecutorFactory
+            // This will use KasplexEvmFactory and KasplexEvmHandler
+            // to distribute base fees to treasury address
+            let mut strategy = config
+                .executor_for_block(&mut executor_state, &result.block)
+                .map_err(|e| VerificationError::ExecutionError(format!("Failed to create executor: {}", e)))?;
+
+            // Execute block
+            strategy
+                .apply_pre_execution_changes()
+                .map_err(|e| VerificationError::ExecutionError(format!("Pre-execution failed: {}", e)))?;
+
+            for tx in result.block.transactions_recovered() {
+                strategy
+                    .execute_transaction(tx)
+                    .map_err(|e| VerificationError::ExecutionError(format!("Transaction execution failed: {}", e)))?;
+            }
+
+            strategy
+                .apply_post_execution_changes()
+                .map_err(|e| VerificationError::ExecutionError(format!("Post-execution failed: {}", e)))?
+        }
+    };
 
     // Validate consensus before merging
     let consensus = reth_node_ethereum::consensus::EthBeaconConsensus::new(chain_spec.clone());
@@ -160,7 +200,7 @@ pub fn verify(result: &ExecutionResult, chain_spec: Arc<ChainSpec>) -> Result<()
 
     executor_state.merge_transitions(BundleRetention::PlainState);
     let bundle = executor_state.take_bundle();
-    
+
     // Create BlockExecutionOutput to match the pattern in engine
     let output = BlockExecutionOutput {
         state: bundle,
@@ -184,8 +224,6 @@ pub fn verify(result: &ExecutionResult, chain_spec: Arc<ChainSpec>) -> Result<()
             expected: expected_state_root,
         });
     }
-
-    info!(target: "ress::verifier", block_hash = %result.block.hash(), "Verification successful");
     Ok(())
 }
 

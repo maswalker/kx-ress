@@ -11,7 +11,7 @@ RPC_URL="${RPC_URL:-http://localhost:8545}"
 API_URL="${API_URL:-http://localhost:8080/execute_block}"
 
 # Get block number from argument or default to 10
-BLOCK_NUMBER="${1:-10}"
+BLOCK_NUMBER="${1:-47020}"
 
 echo "Fetching block info for block $BLOCK_NUMBER from $RPC_URL..."
 

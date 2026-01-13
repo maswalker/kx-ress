@@ -79,6 +79,11 @@ impl RessProvider {
         self.chain_state.insert_witness(block_hash, witness);
     }
 
+    /// Get witness for a block hash if it exists in chain state
+    pub fn witness(&self, block_hash: &B256) -> Option<Vec<Bytes>> {
+        self.chain_state.witness(block_hash)
+    }
+
     pub fn bytecode_exists(&self, code_hash: B256) -> Result<bool, DatabaseError> {
         self.database.bytecode_exists(code_hash)
     }

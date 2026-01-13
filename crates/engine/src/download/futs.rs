@@ -635,42 +635,47 @@ impl FetchWitnessFuture {
 }
 
 impl Future for FetchWitnessFuture {
-    type Output = ExecutionWitness;
+    type Output = Result<ExecutionWitness, String>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        loop {
-            match ready!(this.pending.poll_unpin(cx)) {
-                Ok(witness) => {
-                    if witness.is_empty() {
-                        trace!(target: "ress::engine::downloader", block_hash = %this.block_hash, "Received empty witness");
-                    } else {
-                        let rlp_size_bytes = witness.length();
-                        let valid = {
-                            // TODO:
-                            // for StateWitnessEntry { hash, bytes } in witness {
-                            //     let entry_hash = keccak256(&bytes);
-                            //     if hash == entry_hash {
-                            //         state_witness.insert(hash, bytes);
-                            //     } else {
-                            //         trace!(target: "ress::engine::downloader", block_hash =
-                            // %this.block_hash, expected = %entry_hash, received = %hash, "Invalid
-                            // witness entry");         break 'witness
-                            // false     }
-                            // }
-                            true
-                        };
-                        if valid {
-                            return Poll::Ready(ExecutionWitness::new(witness, rlp_size_bytes))
-                        }
+        match ready!(this.pending.poll_unpin(cx)) {
+            Ok(witness) => {
+                if witness.is_empty() {
+                    let error_msg = format!("Witness not found or empty for block {}", this.block_hash);
+                    error!(target: "ress::engine::downloader", block_hash = %this.block_hash, elapsed_ms = this.elapsed().as_millis(), "FetchWitnessFuture: Received empty witness, returning error");
+                    return Poll::Ready(Err(error_msg));
+                } else {
+                    let rlp_size_bytes = witness.length();
+                    info!(target: "ress::engine::downloader", block_hash = %this.block_hash, witness_entries = witness.len(), rlp_size_bytes, elapsed_ms = this.elapsed().as_millis(), "FetchWitnessFuture: Received non-empty witness");
+                    let valid = {
+                        // TODO:
+                        // for StateWitnessEntry { hash, bytes } in witness {
+                        //     let entry_hash = keccak256(&bytes);
+                        //     if hash == entry_hash {
+                        //         state_witness.insert(hash, bytes);
+                        //     } else {
+                        //         trace!(target: "ress::engine::downloader", block_hash =
+                        // %this.block_hash, expected = %entry_hash, received = %hash, "Invalid
+                        // witness entry");         break 'witness
+                        // false     }
+                        // }
+                        true
+                    };
+                    if valid {
+                        return Poll::Ready(Ok(ExecutionWitness::new(witness, rlp_size_bytes)));
                     }
                 }
-                Err(error) => {
-                    trace!(target: "ress::engine::downloader", %error, %this.block_hash, "Witness download failed");
-                }
-            };
-            this.pending = this.witness_request();
+            }
+            Err(error) => {
+                let error_msg = format!("Witness download failed: {}", error);
+                error!(target: "ress::engine::downloader", %error, block_hash = %this.block_hash, elapsed_ms = this.elapsed().as_millis(), "FetchWitnessFuture: Witness download failed, returning error");
+                return Poll::Ready(Err(error_msg));
+            }
         }
+
+        // This should never be reached, but just in case
+        Poll::Ready(Err(format!("Unexpected error in FetchWitnessFuture for block {}", this.block_hash)))
     }
 }

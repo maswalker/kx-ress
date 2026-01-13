@@ -65,7 +65,7 @@ impl EngineDownloader {
         );
         self.inflight_full_block_requests.push(fut);
         self.metrics.inc_total(RequestMetricTy::FullBlock);
-        self.metrics.set_inflight(RequestMetricTy::FullBlock, self.inflight_witness_requests.len());
+        self.metrics.set_inflight(RequestMetricTy::FullBlock, self.inflight_full_block_requests.len());
     }
 
     /// Download bytecode by code hash.
@@ -74,7 +74,6 @@ impl EngineDownloader {
             return
         }
 
-        debug!(target: "ress::engine::downloader", %code_hash, "Downloading bytecode");
         let fut = FetchBytecodeFuture::new(self.network.clone(), self.retry_delay, code_hash);
         self.inflight_bytecode_requests.push(fut);
         self.metrics.inc_total(RequestMetricTy::Bytecode);
@@ -156,15 +155,29 @@ impl EngineDownloader {
         // advance all witness requests
         for idx in (0..self.inflight_witness_requests.len()).rev() {
             let mut request = self.inflight_witness_requests.swap_remove(idx);
-            if let Poll::Ready(witness) = request.poll_unpin(cx) {
-                let elapsed = request.elapsed();
-                self.metrics.record_elapsed(RequestMetricTy::Witness, elapsed);
-                self.outcomes.push_back(DownloadOutcome::new(
-                    DownloadData::Witness(request.block_hash(), witness),
-                    elapsed,
-                ));
-            } else {
-                self.inflight_witness_requests.push(request);
+            match request.poll_unpin(cx) {
+                Poll::Ready(Ok(witness)) => {
+                    let elapsed = request.elapsed();
+                    let block_hash = request.block_hash();
+                    self.metrics.record_elapsed(RequestMetricTy::Witness, elapsed);
+                    self.outcomes.push_back(DownloadOutcome::new(
+                        DownloadData::Witness(block_hash, witness),
+                        elapsed,
+                    ));
+                }
+                Poll::Ready(Err(error)) => {
+                    let elapsed = request.elapsed();
+                    let block_hash = request.block_hash();
+                    error!(target: "ress::engine::downloader", %block_hash, %error, ?elapsed, "Downloader: Witness download failed");
+                    self.metrics.record_elapsed(RequestMetricTy::Witness, elapsed);
+                    self.outcomes.push_back(DownloadOutcome::new(
+                        DownloadData::WitnessError(block_hash, error),
+                        elapsed,
+                    ));
+                }
+                Poll::Pending => {
+                    self.inflight_witness_requests.push(request);
+                }
             }
         }
         self.metrics.set_inflight(RequestMetricTy::Witness, self.inflight_witness_requests.len());
@@ -221,6 +234,8 @@ pub enum DownloadData {
     Witness(B256, ExecutionWitness),
     /// Downloaded full block with ancestors.
     FinalizedBlock(SealedBlock, Vec<SealedHeader>),
+    /// Download failed with error.
+    WitnessError(B256, String),
 }
 
 #[derive(Default, Debug)]

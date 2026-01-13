@@ -3,6 +3,7 @@ use alloy_rlp::Encodable;
 use ress_engine::engine::Engine;
 use ress_engine::task::TaskRequest;
 use ress_verifier::verify as verify_execution;
+use kasplex_reth_chainspec::spec::KasplexChainSpec;
 use reth_chainspec::ChainSpec;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -13,13 +14,15 @@ use tracing::*;
 pub struct ApiState {
     pub(crate) execute_engine: Arc<Mutex<Engine>>,
     pub(crate) chain_spec: Arc<ChainSpec>,
+    pub(crate) kasplex_chain_spec: Option<Arc<KasplexChainSpec>>,
 }
 
 impl ApiState {
-    pub fn new(execute_engine: Engine, chain_spec: Arc<ChainSpec>) -> Self {
+    pub fn new(execute_engine: Engine, chain_spec: Arc<ChainSpec>, kasplex_chain_spec: Option<Arc<KasplexChainSpec>>) -> Self {
         Self {
             execute_engine: Arc::new(Mutex::new(execute_engine)),
             chain_spec,
+            kasplex_chain_spec,
         }
     }
 }
@@ -123,7 +126,7 @@ pub async fn execute_block(
             info!(target: "ress::api", block_height = %request.block_height, %block_hash, state_root = %state_root, "Block executed");
             
             // Verify the execution result using verifier
-            match verify_execution(&result, state.chain_spec.clone()) {
+            match verify_execution(&result, state.chain_spec.clone(), state.kasplex_chain_spec.clone()) {
                 Ok(()) => {
                     info!(target: "ress::api", block_height = %request.block_height, %block_hash, "Verification successful");
                 }

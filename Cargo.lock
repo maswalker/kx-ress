@@ -6672,6 +6672,7 @@ dependencies = [
  "alloy-primitives 1.5.2",
  "alloy-rlp",
  "itertools 0.14.0",
+ "kasplex-reth-chainspec",
  "rayon",
  "ress-engine",
  "ress-evm",

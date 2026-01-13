@@ -103,7 +103,8 @@ impl NodeLauncher {
         );
         
         // Create API state with Engine and chain_spec
-        let api_state = ApiState::new(execute_engine, chain_spec.clone());
+        // Pass KasplexChainSpec to enable Kasplex-specific verification (base fee distribution)
+        let api_state = ApiState::new(execute_engine, chain_spec.clone(), Some(self.args.chain.clone()));
         
         // Spawn Engine in background (similar to original ress code)
         // Engine implements Future and needs to be polled continuously
