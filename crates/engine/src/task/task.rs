@@ -14,6 +14,11 @@ pub struct TaskRequest {
     pub block_hash: B256,
     pub block_height: BlockNumber,
     pub parent_hash: B256,
+    /// Whether to download witness for this block. Default is true.
+    /// If false, witness/bytecode download will be skipped.
+    /// For empty blocks, if false, only basic validations will be performed:
+    /// parent_hash correctness, block_number continuity, and state_root == parent_state_root.
+    pub download_witness: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,5 +64,7 @@ pub struct Task {
     pub result_tx: oneshot::Sender<Result<TaskResult, TaskError>>,
     pub state: TaskState,
     pub created_at: Instant,
+    /// Whether to download witness for this block
+    pub download_witness: bool,
 }
 

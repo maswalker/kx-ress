@@ -96,20 +96,21 @@ impl TaskManager {
 
         Poll::Pending
     }
+
     pub fn create_task(
         &mut self,
         request: TaskRequest,
     ) -> oneshot::Receiver<Result<TaskResult, TaskError>> {
         let task_id = self.next_task_id.fetch_add(1, Ordering::SeqCst);
-        
+
         let (tx, rx) = oneshot::channel();
-        
+
         let state = TaskState {
             block_ready: false,
             parent_block_ready: false,
             witness_ready: false,
         };
-        
+
         let task = Task {
             id: task_id,
             block_hash: request.block_hash,
@@ -118,30 +119,34 @@ impl TaskManager {
             result_tx: tx,
             state,
             created_at: Instant::now(),
+            download_witness: request.download_witness,
         };
 
         self.tasks.insert(task_id, task);
-        
+
         self.block_to_tasks
             .entry(request.block_hash)
             .or_insert_with(HashSet::new)
             .insert(task_id);
-        
+
         self.parent_hash_to_tasks
             .entry(request.parent_hash)
             .or_insert_with(HashSet::new)
             .insert(task_id);
-        
+
         self.start_task(task_id);
 
         rx
     }
 
     fn start_task(&mut self, task_id: TaskId) {
-        let task = self.tasks.get_mut(&task_id).expect("Task should exist");
-        let block_hash = task.block_hash;
-        let parent_hash = task.parent_hash;
+        let (block_hash, parent_hash, download_witness) = {
+            let task = self.tasks.get(&task_id).expect("Task should exist");
+            (task.block_hash, task.parent_hash, task.download_witness)
+        };
 
+        let task = self.tasks.get_mut(&task_id).expect("Task should exist");
+        
         if let Some(block) = self.provider.recovered_block(&block_hash) {
             self.block_buffer.insert_block(block);
             task.state.block_ready = true;
@@ -151,30 +156,17 @@ impl TaskManager {
             task.state.block_ready = true;
         }
 
-        if let Some(witness) = self.block_buffer.witness(&block_hash) {
-            let code_hashes = witness.bytecode_hashes().clone();
-            let missing_code_hashes = self.provider.missing_code_hashes(code_hashes)
-                .unwrap_or_default();
-
-            if missing_code_hashes.is_empty() {
-                task.state.witness_ready = true;
-            } else {
-                for code_hash in &missing_code_hashes {
-                    self.downloader.download_bytecode(*code_hash);
-                }
-            }
-        } else if let Some(witness_bytes) = self.provider.witness(&block_hash) {
-            // Witness exists in provider but not in block_buffer, load it
-            if !witness_bytes.is_empty() {
-                // Calculate RLP size as sum of all bytes (approximation)
-                let rlp_size_bytes = witness_bytes.iter().map(|b| b.len()).sum();
-                let execution_witness = ExecutionWitness::new(witness_bytes, rlp_size_bytes);
-
-                let code_hashes = execution_witness.bytecode_hashes().clone();
+        // If download_witness is false, skip witness download entirely
+        if !download_witness {
+            // Skip witness/bytecode download
+            // The witness_ready flag will be set to true immediately
+            task.state.witness_ready = true;
+        } else {
+            // Normal witness download logic
+            if let Some(witness) = self.block_buffer.witness(&block_hash) {
+                let code_hashes = witness.bytecode_hashes().clone();
                 let missing_code_hashes = self.provider.missing_code_hashes(code_hashes)
                     .unwrap_or_default();
-
-                self.block_buffer.insert_witness(block_hash, execution_witness, missing_code_hashes.clone());
 
                 if missing_code_hashes.is_empty() {
                     task.state.witness_ready = true;
@@ -183,11 +175,32 @@ impl TaskManager {
                         self.downloader.download_bytecode(*code_hash);
                     }
                 }
+            } else if let Some(witness_bytes) = self.provider.witness(&block_hash) {
+                // Witness exists in provider but not in block_buffer, load it
+                if !witness_bytes.is_empty() {
+                    // Calculate RLP size as sum of all bytes (approximation)
+                    let rlp_size_bytes = witness_bytes.iter().map(|b| b.len()).sum();
+                    let execution_witness = ExecutionWitness::new(witness_bytes, rlp_size_bytes);
+
+                    let code_hashes = execution_witness.bytecode_hashes().clone();
+                    let missing_code_hashes = self.provider.missing_code_hashes(code_hashes)
+                        .unwrap_or_default();
+
+                    self.block_buffer.insert_witness(block_hash, execution_witness, missing_code_hashes.clone());
+
+                    if missing_code_hashes.is_empty() {
+                        task.state.witness_ready = true;
+                    } else {
+                        for code_hash in &missing_code_hashes {
+                            self.downloader.download_bytecode(*code_hash);
+                        }
+                    }
+                } else {
+                    self.downloader.download_witness(block_hash);
+                }
             } else {
                 self.downloader.download_witness(block_hash);
             }
-        } else {
-            self.downloader.download_witness(block_hash);
         }
 
         if parent_hash == B256::ZERO {
@@ -393,10 +406,10 @@ impl TaskManager {
     }
 
     fn execute_task(&mut self, task_id: TaskId) -> Result<(), TaskError> {
-        let (block_hash, parent_hash, block_height) = {
+        let (block_hash, parent_hash, block_height, download_witness) = {
             let task = self.tasks.get(&task_id)
                 .ok_or_else(|| TaskError::ExecutionError(format!("Task {} not found", task_id)))?;
-            (task.block_hash, task.parent_hash, task.block_height)
+            (task.block_hash, task.parent_hash, task.block_height, task.download_witness)
         };
         if let Some(task_ids) = self.block_to_tasks.get_mut(&block_hash) {
             task_ids.remove(&task_id);
@@ -443,8 +456,6 @@ impl TaskManager {
                 block.number
             )));
         }
-        let witness = self.block_buffer.witness(&block_hash)
-            .ok_or_else(|| TaskError::WitnessNotFound(block_hash))?;
         // Verify that the block's parent_hash matches the requested parent_hash
         // (if parent_hash is not zero, which indicates genesis)
         if parent_hash != B256::ZERO && block.parent_hash != parent_hash {
@@ -459,37 +470,75 @@ impl TaskManager {
         let parent_block = self.provider.recovered_block(&parent_hash)
             .or_else(|| self.block_buffer.blocks.get(&parent_hash).cloned())
             .ok_or_else(|| TaskError::ParentNotFound(parent_hash))?;
-        let mut bytecodes = Vec::new();
-        for code_hash in witness.bytecode_hashes() {
-            match self.provider.get_bytecode(*code_hash) {
-                Ok(Some(bytecode)) => {
-                    bytecodes.push((*code_hash, bytecode));
-                }
-                Ok(None) => {
-                    return Err(TaskError::BytecodeNotFound(*code_hash));
-                }
-                Err(e) => {
-                    return Err(TaskError::ProviderError(reth_errors::ProviderError::Database(e)));
+
+        // Check if this is an empty block and if we should skip witness verification
+        let is_empty = block.body().transactions.is_empty() && block.body().ommers.is_empty();
+        let should_skip_witness = is_empty && !download_witness;
+
+        if should_skip_witness {
+            // For empty blocks, only perform basic validations:
+            // 1. block.hash() correctness (already verified above)
+            // 2. parent_hash correctness (already verified above)
+            // 3. block_number continuity (already verified above)
+            // 4. state_root == parent_state_root (empty block characteristic)
+            if block.state_root != parent_block.state_root {
+                return Err(TaskError::StateRootMismatch {
+                    block: block.hash(),
+                    got: parent_block.state_root,
+                    expected: block.state_root,
+                });
+            }
+
+            // Create a minimal result for empty blocks
+            // Note: For empty blocks, we don't have a witness, so we create an empty one
+            use ress_primitives::witness::ExecutionWitness;
+            let empty_witness = ExecutionWitness::new(vec![], 0);
+
+            let result = TaskResult {
+                block: block.clone(),
+                parent_block,
+                witness: empty_witness,
+                bytecodes: Vec::new(),
+            };
+            let _ = task.result_tx.send(Ok(result));
+            Ok(())
+        } else {
+            // Normal execution path with witness verification
+            let witness = self.block_buffer.witness(&block_hash)
+                .ok_or_else(|| TaskError::WitnessNotFound(block_hash))?;
+            
+            let mut bytecodes = Vec::new();
+            for code_hash in witness.bytecode_hashes() {
+                match self.provider.get_bytecode(*code_hash) {
+                    Ok(Some(bytecode)) => {
+                        bytecodes.push((*code_hash, bytecode));
+                    }
+                    Ok(None) => {
+                        return Err(TaskError::BytecodeNotFound(*code_hash));
+                    }
+                    Err(e) => {
+                        return Err(TaskError::ProviderError(reth_errors::ProviderError::Database(e)));
+                    }
                 }
             }
-        }
 
-        let calculated_state_root = self.verify_block(block, &parent_block, witness, parent_block.state_root)?;
-        if calculated_state_root != block.state_root {
-            return Err(TaskError::StateRootMismatch {
-                block: block.hash(),
-                got: calculated_state_root,
-                expected: block.state_root,
-            });
+            let calculated_state_root = self.verify_block(block, &parent_block, witness, parent_block.state_root)?;
+            if calculated_state_root != block.state_root {
+                return Err(TaskError::StateRootMismatch {
+                    block: block.hash(),
+                    got: calculated_state_root,
+                    expected: block.state_root,
+                });
+            }
+            let result = TaskResult {
+                block: block.clone(),
+                parent_block,
+                witness: witness.clone(),
+                bytecodes,
+            };
+            let _ = task.result_tx.send(Ok(result));
+            Ok(())
         }
-        let result = TaskResult {
-            block: block.clone(),
-            parent_block,
-            witness: witness.clone(),
-            bytecodes,
-        };
-        let _ = task.result_tx.send(Ok(result));
-        Ok(())
     }
     
     fn verify_block(

@@ -49,18 +49,33 @@ if [ -z "$PARENT_HASH" ] || [ "$PARENT_HASH" = "null" ]; then
     exit 1
 fi
 
+# Extract transaction count to determine if block has transactions
+# Note: When params=[block_number, false], transactions is returned as array length
+# When params=[block_number, true], transactions is returned as full transaction objects
+# Since we're using false, we need to get the transactions array and check its length
+TRANSACTIONS=$(echo "$BLOCK_DATA" | jq -r '.result.transactions // []')
+TRANSACTION_COUNT=$(echo "$TRANSACTIONS" | jq 'length')
+
+# Set with_tx based on transaction count
+WITH_TX="false"
+if [ "$TRANSACTION_COUNT" -gt 0 ]; then
+    WITH_TX="true"
+fi
+
 echo "Block info:"
 echo "  Number: $BLOCK_NUMBER"
 echo "  Hash: $BLOCK_HASH"
 echo "  Parent hash: $PARENT_HASH"
+echo "  Transaction count: $TRANSACTION_COUNT"
+echo "  Has transactions (with_tx): $WITH_TX"
 echo ""
 echo "Executing block via API at $API_URL..."
 echo ""
 
-# Execute the block with all required fields
+# Execute the block with all required fields including with_tx
 RESPONSE=$(curl -s -X POST "$API_URL" \
     -H 'Content-Type: application/json' \
-    -d "{\"block_hash\": \"$BLOCK_HASH\", \"block_height\": $BLOCK_NUMBER, \"parent_hash\": \"$PARENT_HASH\"}")
+    -d "{\"block_hash\": \"$BLOCK_HASH\", \"block_height\": $BLOCK_NUMBER, \"parent_hash\": \"$PARENT_HASH\", \"with_tx\": $WITH_TX}")
 
 # Pretty print JSON response
 echo "Response:"

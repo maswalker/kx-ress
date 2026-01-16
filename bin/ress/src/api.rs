@@ -32,6 +32,10 @@ pub struct ExecuteBlockRequest {
     pub block_hash: String,
     pub block_height: u64,
     pub parent_hash: String,
+    /// Whether the block has transactions (transactionCount > 0).
+    /// If true, witness will be downloaded. If false or omitted, witness download will be skipped for empty blocks.
+    #[serde(default)]
+    pub with_tx: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +118,7 @@ pub async fn execute_block(
         block_hash,
         block_height: request.block_height,
         parent_hash,
+        download_witness: request.with_tx, // Download witness only if block has transactions
     };
     
     let rx = {

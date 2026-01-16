@@ -106,6 +106,26 @@ pub fn verify(
         )));
     }
 
+    // Check if this is an empty block (no transactions and no ommers)
+    let is_empty = result.block.body().transactions.is_empty() && result.block.body().ommers.is_empty();
+
+    if is_empty {
+        // For empty blocks, only perform basic validations:
+        // 1. block.hash() correctness (already verified above)
+        // 2. parent_hash correctness (already verified above)
+        // 3. block_number continuity (already verified above)
+        // 4. state_root == parent_state_root (empty block characteristic)
+        if result.block.state_root != result.parent_block.state_root {
+            return Err(VerificationError::StateRootMismatch {
+                got: result.parent_block.state_root,
+                expected: result.block.state_root,
+            });
+        }
+        // Empty block verification complete
+        return Ok(());
+    }
+
+    // Normal verification path for blocks with transactions
     // Create provider with only bytecodes from result
     let provider = VerifierProvider::new(
         chain_spec.clone(),
