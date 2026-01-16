@@ -5,12 +5,16 @@ use crate::witness::ExecutionWitness;
 use reth_primitives::{Block, Bytecode, RecoveredBlock};
 use thiserror::Error;
 
-/// Result of executing a block.
+/// Result of executing blocks.
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
-    pub block: RecoveredBlock<Block>,
+    /// Blocks in the same order as requested
+    pub blocks: Vec<RecoveredBlock<Block>>,
+    /// Parent block of the first block
     pub parent_block: RecoveredBlock<Block>,
-    pub witness: ExecutionWitness,
+    /// Witnesses for each block (same order as blocks)
+    pub witnesses: Vec<ExecutionWitness>,
+    /// All bytecodes from all blocks (merged and deduplicated by code hash)
     pub bytecodes: Vec<(B256, Bytecode)>,
 }
 

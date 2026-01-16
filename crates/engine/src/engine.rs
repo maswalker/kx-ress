@@ -47,9 +47,9 @@ impl Engine {
             match task_rx.await {
                 Ok(Ok(task_result)) => {
                     let execution_result = ExecutionResult {
-                        block: task_result.block,
+                        blocks: task_result.blocks,
                         parent_block: task_result.parent_block,
-                        witness: task_result.witness,
+                        witnesses: task_result.witnesses,
                         bytecodes: task_result.bytecodes,
                     };
                     let _ = tx.send(Ok(execution_result));

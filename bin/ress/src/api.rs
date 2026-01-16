@@ -114,23 +114,39 @@ pub async fn execute_block(
         }
     };
 
+    // Convert single block request to new format (single block is a batch with one element)
     let task_request = TaskRequest {
-        block_hash,
-        block_height: request.block_height,
         parent_hash,
-        download_witness: request.with_tx, // Download witness only if block has transactions
+        block_hashes: vec![block_hash],
+        start_block_height: request.block_height,
+        download_witnesses: vec![request.with_tx], // Download witness only if block has transactions
     };
-    
+
     let rx = {
         let mut engine = state.execute_engine.lock().await;
         engine.execute_block(task_request)
     };
     match rx.await {
         Ok(Ok(result)) => {
-            let state_root = result.block.state_root;
+            // For single block API, we use the first (and only) block
+            if result.blocks.is_empty() {
+                return axum::Json(ExecuteBlockResponse {
+                    success: false,
+                    block_hash: request.block_hash.clone(),
+                    state_root: None,
+                    block: None,
+                    parent_block: None,
+                    witness: None,
+                    bytecodes: None,
+                    error: Some("No blocks in execution result".to_string()),
+                });
+            }
+
+            let block = &result.blocks[0];
+            let state_root = block.state_root;
             info!(target: "ress::api", block_height = %request.block_height, %block_hash, state_root = %state_root, "Block executed");
-            
-            // Verify the execution result using verifier
+
+            // Verify the execution result using verifier (verifier handles multiple blocks)
             match verify_execution(&result, state.chain_spec.clone(), state.kasplex_chain_spec.clone()) {
                 Ok(()) => {
                     info!(target: "ress::api", block_height = %request.block_height, %block_hash, "Verification successful");
@@ -141,15 +157,15 @@ pub async fn execute_block(
                     // The verification is a check, not a requirement for the API response
                 }
             }
-            
-            // Encode block as RLP
+
+            // Encode block as RLP (using first block)
             let block_rlp = {
-                let sealed_block = result.block.clone_sealed_block();
+                let sealed_block = block.clone_sealed_block();
                 let mut buffer = Vec::new();
                 sealed_block.encode(&mut buffer);
                 format!("0x{}", hex::encode(buffer))
             };
-            
+
             // Encode parent block as RLP
             let parent_block_rlp = {
                 let sealed_block = result.parent_block.clone_sealed_block();
@@ -157,15 +173,15 @@ pub async fn execute_block(
                 sealed_block.encode(&mut buffer);
                 format!("0x{}", hex::encode(buffer))
             };
-            
-            // Encode witness state_witness as hex strings
+
+            // Encode witness state_witness as hex strings (using first block's witness)
             let witness_data = WitnessData {
-                state_witness: result.witness.state_witness()
+                state_witness: result.witnesses[0].state_witness()
                     .iter()
                     .map(|bytes| format!("0x{}", hex::encode(bytes.as_ref())))
                     .collect(),
             };
-            
+
             // Encode bytecodes
             let bytecodes_data: Vec<BytecodeData> = result.bytecodes
                 .iter()
@@ -176,7 +192,7 @@ pub async fn execute_block(
                     }
                 })
                 .collect();
-            
+
             axum::Json(ExecuteBlockResponse {
                 success: true,
                 block_hash: format!("{:?}", block_hash),

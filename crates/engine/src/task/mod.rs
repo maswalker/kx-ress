@@ -6,7 +6,7 @@ pub mod block_buffer;
 pub mod outcome;
 pub mod root;
 
-pub use task::{Task, TaskState, TaskResult, TaskError, TaskId, TaskRequest};
+pub use task::{Task, TaskState, TaskResult, TaskError, TaskId, TaskRequest, BlockState};
 pub use manager::TaskManager;
 pub use block_buffer::BlockBuffer;
 pub use outcome::*;
