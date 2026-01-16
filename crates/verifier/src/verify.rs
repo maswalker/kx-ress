@@ -147,7 +147,6 @@ pub fn verify(
         
         // Create provider with all bytecodes from result
         let provider = VerifierProvider::new(
-            chain_spec.clone(),
             result.bytecodes.clone(),
         );
 
@@ -175,7 +174,7 @@ pub fn verify(
         let evm_config = if let Some(ref kasplex_chain_spec) = kasplex_chain_spec {
             EvmConfigWrapper::from_kasplex_chain_spec(kasplex_chain_spec.clone())
         } else {
-            EvmConfigWrapper::from_ethereum_chain_spec(provider.chain_spec())
+            EvmConfigWrapper::from_ethereum_chain_spec(chain_spec.clone())
         };
 
         let mut executor_state = state;

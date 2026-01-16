@@ -3,33 +3,25 @@
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{keccak256, Address, B256, U256};
 use alloy_rlp::Decodable;
-use reth_chainspec::ChainSpec;
 use reth_primitives::Bytecode;
 use reth_provider::ProviderError;
 use reth_revm::{bytecode::Bytecode as RevmBytecode, state::AccountInfo, Database};
 use reth_trie_sparse::SparseStateTrie;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// A simple provider that only uses bytecodes from ExecutionResult.
 /// This does not access any cached data from the engine.
 #[derive(Debug)]
 pub(crate) struct VerifierProvider {
-    chain_spec: Arc<ChainSpec>,
     bytecodes: HashMap<B256, Bytecode>,
 }
 
 impl VerifierProvider {
-    pub(crate) fn new(chain_spec: Arc<ChainSpec>, bytecodes: Vec<(B256, Bytecode)>) -> Self {
+    pub(crate) fn new(bytecodes: Vec<(B256, Bytecode)>) -> Self {
         let bytecodes_map: HashMap<B256, Bytecode> = bytecodes.into_iter().collect();
         Self {
-            chain_spec,
             bytecodes: bytecodes_map,
         }
-    }
-
-    pub(crate) fn chain_spec(&self) -> Arc<ChainSpec> {
-        self.chain_spec.clone()
     }
 }
 
