@@ -58,13 +58,11 @@ where
 
 // Implement Consensus trait for reth_primitives::Block (Ethereum block type)
 impl ConsensusTrait<reth_primitives::Block> for ConsensusWrapper {
-    type Error = reth_consensus::ConsensusError;
-
     fn validate_body_against_header(
         &self,
         body: &<reth_primitives::Block as Block>::Body,
         header: &SealedHeader<<reth_primitives::Block as Block>::Header>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), reth_consensus::ConsensusError> {
         match self {
             Self::Ethereum(consensus) => {
                 <EthBeaconConsensus<ChainSpec> as ConsensusTrait<reth_primitives::Block>>::validate_body_against_header(
@@ -82,7 +80,7 @@ impl ConsensusTrait<reth_primitives::Block> for ConsensusWrapper {
     fn validate_block_pre_execution(
         &self,
         block: &SealedBlock<reth_primitives::Block>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), reth_consensus::ConsensusError> {
         match self {
             Self::Ethereum(consensus) => {
                 <EthBeaconConsensus<ChainSpec> as ConsensusTrait<reth_primitives::Block>>::validate_block_pre_execution(

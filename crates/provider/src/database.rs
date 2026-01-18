@@ -91,7 +91,7 @@ impl RessDatabase {
                 let table = Tables::Bytecodes.name();
                 let table_label = Label::new("table", table);
                 let table_db = tx.inner.open_db(Some(table))?;
-                let stats = tx.inner.db_stat(&table_db)?;
+                let stats = tx.inner.db_stat(table_db.dbi())?;
 
                 let page_size = stats.page_size() as usize;
                 let leaf_pages = stats.leaf_pages();
