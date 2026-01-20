@@ -672,7 +672,8 @@ impl TaskManager {
         <ConsensusWrapper as FullConsensus<EthPrimitives>>::validate_block_post_execution(
             &self.consensus,
             block,
-            &output.result
+            &output.result,
+            None,
         ).map_err(TaskError::ConsensusError)?;
 
         use rayon::iter::IntoParallelRefIterator;

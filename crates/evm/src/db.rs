@@ -42,6 +42,7 @@ impl Database for WitnessDatabase<'_> {
             nonce: account.nonce,
             code_hash: account.code_hash,
             code: None,
+            account_id: None,
         };
         trace!(target: "ress::evm", %address, %hashed_address, ?account_info, "account retrieved");
         Ok(Some(account_info))

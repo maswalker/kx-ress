@@ -54,6 +54,7 @@ impl Database for VerifierDatabase<'_> {
             nonce: account.nonce,
             code_hash: account.code_hash,
             code: None,
+            account_id: None,
         };
         Ok(Some(account_info))
     }

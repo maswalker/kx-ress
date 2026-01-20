@@ -134,7 +134,7 @@ pub(crate) fn adjust_base_fee_for_kasplex_impl(
 
     // Update beneficiary account
     if let Some(account) = hashed_state.accounts.get_mut(&hashed_beneficiary) {
-        if let Some(ref mut acc) = account {
+        if let Some(acc) = account {
             acc.balance = new_beneficiary_balance;
         } else {
             // Create new account if it doesn't exist (shouldn't happen for beneficiary)
@@ -157,7 +157,7 @@ pub(crate) fn adjust_base_fee_for_kasplex_impl(
 
     // Update vault account
     if let Some(account) = hashed_state.accounts.get_mut(&hashed_vault) {
-        if let Some(ref mut acc) = account {
+        if let Some(acc) = account {
             acc.balance = new_vault_balance;
         } else {
             // Create new account if it doesn't exist

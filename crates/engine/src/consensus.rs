@@ -40,16 +40,17 @@ where
         &self,
         block: &RecoveredBlock<N::Block>,
         result: &BlockExecutionResult<N::Receipt>,
+        receipt_root_bloom: Option<reth_consensus::ReceiptRootBloom>,
     ) -> Result<(), reth_consensus::ConsensusError> {
         match self {
             Self::Ethereum(consensus) => {
                 <EthBeaconConsensus<ChainSpec> as FullConsensus<N>>::validate_block_post_execution(
-                    consensus, block, result,
+                    consensus, block, result, receipt_root_bloom,
                 )
             }
             Self::Kasplex(consensus) => {
                 <KasplexBeaconConsensus as FullConsensus<N>>::validate_block_post_execution(
-                    consensus, block, result,
+                    consensus, block, result, receipt_root_bloom,
                 )
             }
         }

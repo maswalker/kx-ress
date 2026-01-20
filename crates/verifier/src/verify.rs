@@ -227,6 +227,7 @@ pub fn verify(
             &consensus,
             block,
             &exec_result,
+            None,
         )
         .map_err(VerificationError::ConsensusError)?;
 
